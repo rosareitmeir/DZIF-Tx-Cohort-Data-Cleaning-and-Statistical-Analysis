@@ -1,0 +1,675 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+
+# Baseline Table 
+
+- table of all baseline variables: Nebgen info, sex, age, Tx info, ... 
+
+```{r}
+
+nebgen.info <- read.csv("../Oct22/NeBGeneral_information.csv", header=T, sep=";" , dec=",")
+nebgen.info<- inner_join(nebgen.info, rej.mapping, by=c("PatientID" = "Johannes")) %>% select(-PatientID, -Dokument ) %>% select(PatientID=Daniela, name=X, everything())
+
+
+baseline.table <- nebgen.info %>% select(-name) %>% distinct() 
+## remove constant columns 
+baseline.table <- baseline.table %>% remove_empty("cols") %>% remove_constant() 
+  
+nebgen.info %>% filter(name %in% donor_ids)
+  
+## remove Date column and allele/HLA columns 
+#nebgen.info <- select(nebgen.info, ! matches("Status*|Container*|*Date*|*Datum*|HLA*|allele*")) 
+  
+baseline.table <- baseline.table %>% select(-Status, -Container.Index, -TxDate.BL.Re.NeBGe) %>% 
+                                    rename(Container_Date=Datum..Container.) %>%
+                                    mutate(Container_Date= as.Date(Container_Date, format="%d.%m.%Y"), 
+                                           Erfassungsdatum= as.Date(Erfassungsdatum, format="%d.%m.%Y"),
+                                           InitialdiagDate.BL.Re.NeBGe= as.Date(InitialdiagDate.BL.Re.NeBGe, format="%d.%m.%Y"))
+
+baseline.table <- left_join(basic.info %>% select(PatientID, Transplantation_Date, Event_Date, rej, Geschlecht) %>% distinct(), baseline.table, by="PatientID") %>% relocate(Container, Container_Date)
+
+colnames(baseline.table) <- str_replace(colnames(baseline.table), ".BL.Re.NeBGe", "")
+colnames(baseline.table) <- str_replace(colnames(baseline.table), ".BL.Do.NeBGe", "")
+
+baseline.table <- baseline.table %>% mutate(sex=case_when(Geschlecht == "männlich" ~ "male",
+                                                          Geschlecht == "weiblich" ~ "female",
+                                                          T ~ "unkown"), .keep="unused", .before=height.cm)
+
+
+X1_NeBGeneral_information_IC_filtered <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/filtered/1.-NeBGeneral_information_IC_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+
+X1_NeBGeneral_information_IC_filtered[81,]$`ICDcode-BL-Re-NeBGe` <- "M31.7"
+
+X1_NeBGeneral_information_IC_filtered<- X1_NeBGeneral_information_IC_filtered %>% select(PatientID, contains("IC") )
+
+names(X1_NeBGeneral_information_IC_filtered) <- str_replace(names(X1_NeBGeneral_information_IC_filtered), "-BL-Re-NeBGe", "")
+
+X1_NeBGeneral_information_IC_filtered <- X1_NeBGeneral_information_IC_filtered %>% select(PatientID,ICDcode, ICDlabel )  %>% group_by(PatientID) %>% mutate(row_id = row_number()) %>% 
+  pivot_wider(id_cols = "PatientID",  names_from = row_id,
+              values_from = c(ICDcode,ICDlabel) , 
+              names_glue = "{.value}{row_id}") %>% 
+  ungroup()
+
+baseline.table<- left_join(baseline.table, X1_NeBGeneral_information_IC_filtered , by="PatientID") %>% relocate(starts_with("ICD"), .before=registrationDate)
+
+## error switched height and weight 
+# PatientID == "MWD5FRF0"
+weight <- baseline.table[59,12]
+height <- baseline.table[59,13]
+baseline.table[59,12] <- height
+baseline.table[59,13] <- weight
+baseline.table[59,]
+## 21YDKU88
+weight <- baseline.table[118,12]
+height <- baseline.table[118,13]
+baseline.table[118,12] <- height
+baseline.table[118,13] <- weight
+baseline.table[118,]
+
+
+
+## calculate BMI 
+baseline.table<- baseline.table %>% mutate(BMI = weightAtTx.kg/((height.cm/100)^2) , BMI.donor=  weightAtTx.donor.kg/((height.donor.cm/100)^2),.before=height.cm)
+
+
+
+
+Personenvariablen <- read_delim("Oct22/all_files_containing_patient_information/Personenvariablen.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+baseline.table <- baseline.table %>% left_join(Personenvariablen %>% select(PatientID, Site), by="PatientID") %>% relocate(Site, .before=sex)
+
+baseline.table %>% filter((!PatientID %in% out_patients) & PatientID %in% cohort2_patients) %>% pull(Site) %>% table()/92
+baseline.table %>% filter((!PatientID %in% out_patients) & PatientID %in% cohort2_patients) %>% pull(Site) %>% table()
+baseline.table %>% filter((!PatientID %in% out_patients) & PatientID %in% cohort2_patients) %>% count(Site,rej) %>% mutate(perc=case_when(rej==0 ~ n/60, T ~ n/32))
+baseline.table %>% filter((!PatientID %in% out_patients) & PatientID %in% cohort2_patients) %>% count(rej,Site) %>% group_by(Site) %>% mutate(perc=n/sum(n))
+
+baseline.table  %>% pull(Site) %>% table()/231
+
+
+## blood type 
+
+baseline.table<- baseline.table %>% mutate(bloodAB0.same= case_when(bloodAB0 == bloodAB0.donor ~ "yes", T ~ "no"), rhesus.same= case_when(bloodRhesus == bloodRhesus.donor ~ "yes", T ~ "no"), .before=bloodAB0)
+
+
+```
+
+
+
+# Labortaory Values 
+
+## Reading Files 
+- 1.2 Laboratory file : "Datum..Container..x.x"  , BL.Re.NeBLa 
+- 2.2 old Laboratory file: FU-Re-NeFLa
+- LabBio folder: Laboratory.csv BL-Re-Labor with also Donor blood values 
+
+### Lab File 1.2
+
+```{r}
+X1.2.Lab <- mergeContainer %>% select(Container, Container_Date=Datum..Container..x.x, PatientID, ends_with("BL.Re.NeBLa") ) %>% distinct()  %>% mutate(across(everything(), as.character))
+
+colnames(X1.2.Lab) <- str_replace(colnames(X1.2.Lab) , ".BL.Re.NeBLa", "")
+
+X1.2.Lab<- X1.2.Lab  %>% filter(rowSums(is.na(X1.2.Lab)) < ncol(X1.2.Lab)-3) 
+
+
+X2_2Laboratory_filtered <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/filtered/2.2Laboratory_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)  %>% mutate(across(everything(), as.character))
+
+colnames(X2_2Laboratory_filtered) <- str_replace(colnames(X2_2Laboratory_filtered), "-FU-Re-NeFLa", "")
+colnames(X2_2Laboratory_filtered) <- str_replace_all(colnames(X2_2Laboratory_filtered), "-", ".")
+
+## filter out empty rows , KEIN DOKUMENT
+X2_2Laboratory_filtered <- X2_2Laboratory_filtered %>% filter(Dokument!= "KEIN DOKUMENT")
+
+X2_2Laboratory_filtered <- X2_2Laboratory_filtered %>% select(-Dokument, -Erfassungsdatum, -`Container Index`, -Status, -contains("AGEF")) %>%
+                                                       rename(Container_Date= `Datum (Container)`)
+
+
+X2_2Laboratory_filtered
+
+
+```
+
+
+### LabBio file: 
+
+- with donor info , separating it and save it an extra file 
+
+
+```{r}
+
+## read in, changing col names 
+Laboratory_filtered <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/filtered/Laboratory_filtered.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)  %>% mutate(across(everything(), as.character))
+
+colnames(Laboratory_filtered) <- str_replace(colnames(Laboratory_filtered), "-BL-Re-Labor", "")
+colnames(Laboratory_filtered) <- str_replace_all(colnames(Laboratory_filtered), "-", ".")
+
+
+###############################################
+#extracting donor information 
+
+Donor_Lab <- Laboratory_filtered %>% select(Container, Container_Date=`Datum (Container)`, PatientID, Cause,dateOfAscertainment,analyzedWithinTimeRange,dateOfAscertainmentEnd, ends_with("BL.Do.Labor") ) %>% filter(DonLabAvailable.BL.Do.Labor == "yes")
+
+
+### adding basic info about patients 
+
+Donor_Lab <- right_join(basic.info %>% select(PatientID, Transplantation_Date, Event_Date, rej) %>% distinct() , Donor_Lab, by="PatientID")
+
+### make it more pretty, changing it to Date and relocate Container 
+
+Donor_Lab <- Donor_Lab %>% relocate(Container,Container_Date) %>% 
+                           mutate(Container_Date= as.Date(Container_Date, format="%d.%m.%Y")) %>%
+                           mutate(Ascertainment_Date= as.Date(dateOfAscertainment, format="%d.%m.%Y"),
+                                  Ascertainment_End_Date= as.Date(dateOfAscertainmentEnd, format="%d.%m.%Y"),
+                                  .keep="unused", .before=Cause
+                                  )
+
+write.table(Donor_Lab %>% arrange(PatientID,Ascertainment_Date),
+            "../tables/match_group/Donor_Laboratory.tsv",  quote = F, col.names = T, row.names = F, sep="\t", na="" )                              
+
+
+########################################
+
+### Recipient 
+
+Laboratory_filtered <- Laboratory_filtered %>% select(-Dokument, -Erfassungsdatum, -`Container Index`, -Status, -contains("AGEF")) %>%
+                                                       rename(Container_Date= `Datum (Container)`) %>%
+                                              select(-ends_with("BL.Do.Labor"))
+colnames(Laboratory_filtered)
+```
+
+
+## Merging Files 
+
+```{r}
+
+
+all(intersect(colnames(X1.2.Lab), colnames(Laboratory_filtered)) %in% colnames(X1.2.Lab))
+all(intersect(colnames(X2_2Laboratory_filtered), colnames(Laboratory_filtered)) %in% colnames(X2_2Laboratory_filtered))
+
+## join them 
+Laboratory<- full_join(full_join(X1.2.Lab , X2_2Laboratory_filtered, by=colnames(X1.2.Lab)), Laboratory_filtered, by=colnames(X2_2Laboratory_filtered))
+
+## sort alphabetically
+Laboratory<- Laboratory[, order(names(Laboratory))]
+
+## add basic info 
+Laboratory <- basic.info %>% select(PatientID, Transplantation_Date, Event_Date, rej) %>% distinct() %>% right_join(Laboratory, by="PatientID")
+
+## relocate columns and change to dates 
+
+Laboratory <- Laboratory %>% relocate(Container, Container_Date) %>% 
+                             mutate(Container_Date= as.Date(Container_Date, format="%d.%m.%Y")) %>%
+                             mutate(Ascertainment_Date= as.Date(dateOfAscertainment, format="%d.%m.%Y"),
+                                  Ascertainment_End_Date= as.Date(dateOfAscertainmentEnd, format="%d.%m.%Y"),
+                                  .keep="unused", .after=rej
+                                  ) %>% relocate(Cause, analyzedWithinTimeRange, .after=Ascertainment_End_Date)
+
+
+Laboratory <- as.data.frame(apply(Laboratory, 2, gsub, patt=",", replace="."))
+
+
+Laboratory<- Laboratory %>% filter(PatientID %in% patientIDs)
+
+
+```
+
+## Lab Subset 
+
+just interest in a subset of the ascertained values 
+
+```{r}
+subset_lab <- Laboratory %>% select(contains("Container") , contains("Date") , PatientID, rej, Cause, analyzedWithinTimeRange, 
+                         contains("Albumin"),
+                         contains("CRP"),
+                         contains("Creatinine"),
+                         contains("HbA1c"),
+                         contains("Hemoglobin"),
+                         contains("Leukocytes"),
+                         contains("Lymphocytes"),
+                         contains("Monocytes"), 
+                         contains("neutro"),
+                         contains("Phosphate"),
+                         contains("PTH"),
+                         contains("Urea"),
+                         contains("Uricacid"),
+                         contains("Urine.Erythrocytes"),
+                         contains("Urine.Leukocytes"), 
+                         contains("Urine.Nitrite"), 
+                         contains("Urine.Protein"))
+
+
+subset_lab[,11:ncol(subset_lab)]<- subset_lab[,11:ncol(subset_lab)] %>% mutate(across(-c(ends_with("Unit"), Urine.Nitrite), as.numeric))
+
+subset_lab <- subset_lab %>% mutate_at(vars(ends_with("_Date")), as.Date, format="%Y-%m-%d")
+subset_lab <- subset_lab %>% mutate(Ascertainment_Tx_diffs = Ascertainment_Date - Transplantation_Date, 
+                                    Ascertainment_Event_diffs = Ascertainment_Date - Event_Date, .before=PatientID )
+
+
+lab.tables <- apply(subset_lab[,11:ncol(subset_lab)]  %>% select(is.numeric) ,2, summary)
+```
+
+## Value Correction 
+### Albumin 
+```{r}
+## Albumin 
+## between 3.5 and 5.5 , 35-55
+
+subset_lab %>% select(contains("Albumin")) %>% remove_empty("rows")
+
+subset_lab <- subset_lab %>% mutate(AlbuminAbs= case_when(
+  is.na(AlbuminAbs) & !is.na(AlbuminRel) ~ AlbuminRel ,
+  T ~ AlbuminAbs)) %>% 
+  mutate(Albumin= case_when(
+  AlbuminAbs > 100 ~ AlbuminAbs/10,
+  AlbuminAbs < 10 ~ AlbuminAbs*10,
+  T ~ AlbuminAbs
+)) %>% select(-AlbuminAbs, -AlbuminRel)
+
+boxplot(subset_lab$Albumin)
+```
+
+### CRP 
+```{r}
+##  CRP: CRPfinal is converted already in mg/L, 
+#180 values were lost due to missing unit or sometimes just not added. 
+## checked the cause for taking the lab, no rejection/infection cause -> treating it as already changed to mg/L thus lower CRP values -> normal measures
+
+subset_lab <- subset_lab %>%
+  mutate(CRP_critical= case_when(!is.na(CRP) & is.na(CRPFinal) & is.na(CRPUnit) ~ "yes",
+                               T ~ "no"),
+           CRPFinal = case_when(!is.na(CRPFinal) ~ CRPFinal,
+                              !is.na(CRP) & is.na(CRPFinal) & CRPUnit == "mg/l" ~ CRP,
+                              !is.na(CRP) & is.na(CRPFinal) & CRPUnit == "mg/dl" ~ CRP*10,
+                              ## critical move
+                              !is.na(CRP) & is.na(CRPFinal) & is.na(CRPUnit)  ~ CRP,
+                              is.na(CRP) & is.na(CRPFinal) ~ NA
+                              
+                              ), .after=CRP) %>% select(-CRP, -CRPUnit)
+```
+
+### Creatinine
+```{r}
+## Creatinine : normal< 1.3, one kidney: 1.8-1.9 , above abnormal > 5.0 severe kidney damage
+## more than 200 creatinine values but no final and unit , taken the value as they are, since only mg/dl is reported , labeled in Creatinine_Critical as yes 
+
+subset_lab<- subset_lab %>% mutate(Creatinine_Critical = case_when(is.na(CreatinineFinal) & !is.na(Creatinine) & is.na(CreatinineUnit) ~ "yes", T ~ "no"), .after=Creatinine) %>%
+              mutate (CreatinineFinal= case_when(
+                        # critical
+                       is.na(CreatinineFinal) & !is.na(Creatinine) ~ Creatinine,
+                       T ~ CreatinineFinal ), .after=Creatinine) %>% 
+              select(-Creatinine, -CreatinineUnit)
+```
+
+### Hemoglobin
+```{r}
+## Hemoglobin, 
+#no given unit, chaging it into g/dl 
+
+boxplot(subset_lab$Hemoglobin)
+
+## critical changes: 
+## everything smaller than 50 -> *10
+### everything bigger than 1000 -> /10
+
+## goal: unit of g/L normal range 138-172 g/L for men 
+
+subset_lab<- subset_lab %>% mutate(HemoglobinFinal = case_when(
+  Hemoglobin <= 50 ~ Hemoglobin*10,
+  Hemoglobin >= 1000 ~ Hemoglobin/10,
+  T ~ Hemoglobin
+), .after=Hemoglobin) %>% mutate(
+  Hemoglobin_Critical = case_when(Hemoglobin != HemoglobinFinal ~ "yes", T ~ "no"),.after=Hemoglobin
+) 
+
+ggplot(select(subset_lab, before=Hemoglobin, after=HemoglobinFinal) %>% gather("type", "value") , aes(x=type,y=value) ) + geom_boxplot()       
+
+
+summary(subset_lab$HemoglobinFinal)
+
+subset_lab <- select(subset_lab, -Hemoglobin)
+```
+
+### Leukocytes
+```{r}
+### Leukocytes: 4500 - 9000 normal 
+
+# goal: changing it into 1/µl 
+## mistake by conversion of 1/nl, should be the same way converted as G/l 
+
+ggplot(select(subset_lab,bef=Leukocytes, after=LeukocytesFinal) %>% gather("type", "value"), aes(x=type, y=value)) + geom_boxplot() + ylim(0,50)
+
+summary(subset_lab$Leukocytes)
+
+summary(subset_lab$LeukocytesFinal)
+
+subset_lab<- subset_lab %>%
+   mutate(Leukocytes_new= case_when(
+     is.na(LeukocytesFinal) & !is.na(Leukocytes) & (LeukocytesUnit=="G/l"|LeukocytesUnit=="1/nl") ~ Leukocytes*1000,
+     ## error measure
+     (Leukocytes == 999000 | Leukocytes== 0.01027) ~ NA, 
+     ## critical moves 
+     ## low ones, assume to be in G/l 
+     is.na(LeukocytesFinal) & is.na(LeukocytesUnit) & Leukocytes <= 20 ~ Leukocytes*1000,
+     ## weird high ones 
+     is.na(LeukocytesFinal) & is.na(LeukocytesUnit) & Leukocytes > 50000 ~ Leukocytes/10,
+     is.na(LeukocytesFinal) & is.na(LeukocytesUnit) & Leukocytes > 100000 ~ Leukocytes/100,
+     
+     ## in the accepted range
+     is.na(LeukocytesFinal) & Leukocytes >= 500 & Leukocytes <= 50000 ~ Leukocytes,
+     
+     ## for the already incorrectly converted units 
+     !is.na(LeukocytesFinal) & LeukocytesUnit == "1/nl" ~ Leukocytes*1000,
+     ## sometimes 1/ul but clearly to low values
+     !is.na(LeukocytesFinal) & LeukocytesFinal <= 20 ~ Leukocytes*1000,
+     T ~ LeukocytesFinal
+  )
+           ) %>% mutate(Leukocytes_Critical = case_when(Leukocytes_new != LeukocytesFinal ~ "yes",Leukocytes_new == LeukocytesFinal ~ "no" ))
+
+ggplot(select(subset_lab,new=Leukocytes_new, before=LeukocytesFinal) %>% gather("type", "value"), aes(x=type, y=(value))) + geom_boxplot() + ylim(500,20000)
+
+## changing missing one by hand
+subset_lab[929,]$Leukocytes_new <- 8390
+
+
+summary(subset_lab$Leukocytes_new)
+summary(subset_lab$LeukocytesFinal)
+
+
+## showing best the results: minimizing numbers of outliers 
+subset_lab %>% filter(Leukocytes_new > 20000 | Leukocytes_new < 500)
+
+subset_lab %>% filter(LeukocytesFinal > 20000 | LeukocytesFinal < 500)
+
+
+subset_lab <- subset_lab %>% select(-Leukocytes, -LeukocytesFinal, -LeukocytesUnit) %>% relocate(Leukocytes_Critical,LeukocytesFinal = Leukocytes_new, .after=HemoglobinFinal)
+
+
+```
+
+
+### Lymphocytes 
+```{r}
+# Lymphocytes 
+
+# normal: 1,000 and 4,800 lymphocytes in every 1 microliter 
+
+
+summary(subset_lab$LymphocytesAbsFinal)
+subset_lab<- subset_lab %>% mutate(LymphocytesAbsFinal2= case_when(
+                              LymphocytesAbs < 5 ~ LymphocytesAbs * 1000,
+                              T ~ LymphocytesAbs), 
+                              .after=LymphocytesAbsFinal)
+ 
+ggplot(subset_lab %>%select(starts_with("LymphocytesAbs") & ! contains("Unit") ) %>% gather(type, value), aes(x=type, y=as.numeric(value))) + geom_boxplot()
+```
+
+### monocytes
+```{r}
+summary(subset_lab$MonocytesAbs)
+summary(subset_lab$MonocytesAbsFinal)
+
+subset_lab<- subset_lab %>% mutate(MonocytesAbsFinal2= case_when(
+                              MonocytesAbs > 100 ~ MonocytesAbs / 1000,
+                              T ~MonocytesAbs), 
+                              .after=MonocytesAbsFinal)
+
+summary(subset_lab$MonocytesAbsFinal2)
+
+ggplot(subset_lab %>%select(starts_with("MonocytesAbs") & ! contains("Unit") ) %>% gather(type, value), aes(x=type, y=as.numeric(value))) + geom_boxplot() + ylim(0,2000)
+
+ggplot(subset_lab %>%select(MonocytesAbsFinal2,MonocytesAbs )  %>% gather(type, value), aes(x=type, y=as.numeric(value))) + geom_boxplot() + ylim(0,2000)
+```
+
+### Total neutrophilis  
+
+```{r}
+summary(subset_lab$TotalneutroAbs)
+summary(subset_lab$TotalneutroAbsFinal)
+
+subset_lab %>% select(starts_with("TotalneutroAbs")) %>% remove_empty("rows")
+  
+  
+subset_lab <- subset_lab %>%  mutate( TotalneutroAbsFinal2= case_when(
+                              TotalneutroAbs >= 1000 ~ TotalneutroAbs / 1000,
+                              T ~  TotalneutroAbs), 
+                              .after= TotalneutroAbsFinal)
+ 
+ggplot(subset_lab %>%select(starts_with("TotalneutroAbs") & ! contains("Unit") ) %>% gather(type, value), aes(x=type, y=as.numeric(value))) + geom_boxplot()
+```
+
+### Phosphate 
+
+```{r}
+## nothing to change here , also difficult conversion mmol/l to mg/dl 
+summary(subset_lab$PhosphateFinal)
+summary(subset_lab$Phosphate)
+```
+
+### Urea 
+
+```{r}
+
+## some values are randomly taken *100 despite same unit 
+# taken urea instead of ureafinal
+
+subset_lab %>% select(starts_with("Urea"))
+
+summary(subset_lab$UreaFinal)
+summary(subset_lab$Urea)
+```
+
+### Urine Values
+```{r}
+## Urine Protein , nothing to change : range of 0 - 20 g protein per liter, whereas < 0.3g is normal and > 20g is very high 
+subset_lab %>% select(contains("Protein")) %>% remove_empty("rows")
+
+boxplot(subset_lab$Urine.ProteinFinal)
+
+## Urine.Erythrocytes, also nthing to change, only 57 entries 
+
+subset_lab %>% select(contains("Urine.Leukocytes")) %>% remove_empty("rows")
+
+```
+
+## Matching Laboratory to Stool Samples
+
+```{r}
+match.Laboratory <- subset_lab %>% full_join(basic.info %>% select(SampleID, PatientID, SampleDate=Date),., by="PatientID")
+
+
+
+
+match.Laboratory <- match.Laboratory %>% filter(PatientID %in% patientIDs & !is.na(SampleDate)) %>% 
+  mutate( distance= SampleDate - as.Date(Ascertainment_Date, format="%Y-%m-%d"), .before=Container )%>% relocate(Ascertainment_Date, .after=SampleDate) %>%
+  group_by(PatientID, SampleID) %>% slice_min(abs(distance)) %>% select(-analyzedWithinTimeRange) %>% distinct() %>% ungroup()
+
+match.Laboratory$SampleID[table(match.Laboratory$SampleID) > 1]
+
+
+match.Laboratory %>% group_by(SampleID) %>% summarise(n=n()) %>% filter(n>1)
+
+match.Laboratory<- match.Laboratory%>% group_by(SampleID) %>% slice_max(UreaFinal)
+
+match.Laboratory<- match.Laboratory %>% rename(Lab_Sample_Distance=distance)
+## 3 samples without lab values since they also not have any sample date 
+```
+
+
+
+## Creatinine Timelines & Plots 
+
+### Timelines
+#### All Follow Ups
+```{r}
+CreatinineTable <- subset_lab %>% select(PatientID, Ascertainment_Date,  Ascertainment_Tx_diffs, Ascertainment_Event_diffs, rej, starts_with("Crea")) %>% filter(!is.na(CreatinineFinal)) %>% arrange(rej, PatientID) %>% filter(PatientID %in% cohort2_patients)
+
+creatinine_plotdf <- CreatinineTable %>% filter(PatientID %in% cohort2_patients & CreatinineFinal < 30 ) %>% mutate(type=case_when(Ascertainment_Event_diffs ==0 ~ "on rejection day", Ascertainment_Tx_diffs ==0 ~ "on KT day", T~ "not"))
+
+coloring <- c("on rejection day" = "#0072B5FF","on KT day" = "#BC3C29FF","not"="black" )
+
+    ggplot(creatinine_plotdf %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T ~ "Rejection")), 
+         aes(x=as.numeric(Ascertainment_Tx_diffs), y=(CreatinineFinal))) + 
+        facet_wrap( ~rej,scales="free")+  geom_line(aes(group=PatientID), linetype="dashed") + 
+          geom_smooth() + geom_point(aes(color=type), size = 2, shape = 16) + scale_y_continuous(limits = c(0, 10)) + xlab("Day Difference of Ascertainment and KT") + ylab("Creatinine in mg/dL")+
+              theme(legend.position = "top") + scale_color_manual(values = coloring,breaks = c("on rejection day" ,"on KT day")) +  theme_bw() + 
+   theme(
+    strip.text = element_text(size=16),
+    strip.background = element_rect(fill="white", linewidth = 0),
+    line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="right",
+    legend.text = element_text(color="black", size=11),
+    
+   
+    panel.background = element_blank())
+```
+
+
+
+
+```{r}
+ggplot(creatinine_plotdf %>% filter(rej==0), 
+         aes(x=as.numeric(Ascertainment_Tx_diffs), y=CreatinineFinal)) + 
+            geom_line(aes(group=PatientID)) + 
+             geom_point(aes(color=type), size = 3, shape = 16) + 
+              theme(legend.position = "none") + scale_color_manual(values = coloring) +
+              #geom_smooth() + 
+              xlab("Day Distance to Tx")
+
+
+ggplot(creatinine_plotdf %>% filter(type != "on Tx day"), aes(x=interaction(type, rej), y=CreatinineFinal)) + geom_boxplot()
+
+
+## non rejector with high creatinine values 
+weird_nonrej_crea <- CreatinineTable%>% group_by(PatientID) %>% filter(any(CreatinineFinal >= 2.5 & Ascertainment_Tx_diffs > 0) & PatientID %in% cohort2_patients & rej==0) %>% select(-rej,-Ascertainment_Event_diffs)
+
+```
+
+
+```{r}
+## sample based 
+
+CreatinineTable %>% group_by(PatientID) %>% filter(Ascertainment_Tx_diffs >= 0 ) %>%  slice_min(CreatinineFinal) %>% distinct(rej, PatientID, CreatinineFinal) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection")) %>% ggplot( aes(x=rej, y=CreatinineFinal,fill=rej)) + geom_boxplot() + stat_compare_means(size=5,label.x.npc = "center") + ylab("Minimum Creatinine") + xlab("")  + theme(legend.position = "none")
+
+
+CreatinineTable %>% group_by(PatientID) %>% filter(Ascertainment_Tx_diffs > 0) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection")) %>% filter(CreatinineFinal <= 20)  %>% ggplot( aes(x=rej, y=CreatinineFinal, fill=rej)) + geom_boxplot() + stat_compare_means(size=5,label.x.npc = "left") + ylab("Creatinine") + xlab("")  + theme(legend.position = "none")
+
+
+cor.test(CreatinineTable %>% filter(rej==1) %>% filter(Ascertainment_Event_diffs <=0 & Ascertainment_Tx_diffs > 0) %>% pull(CreatinineFinal),
+    CreatinineTable %>% filter(rej==1) %>% filter(Ascertainment_Event_diffs <=0& Ascertainment_Tx_diffs > 0)%>% pull(Ascertainment_Event_diffs) %>% as.numeric(),
+    method=c( "pearson"))
+
+CreatinineTable %>% filter(rej==1) %>% filter(Ascertainment_Event_diffs <=0 & Ascertainment_Tx_diffs > 0) %>% ggplot(aes(x=Ascertainment_Event_diffs, y=CreatinineFinal)) + geom_point()
+```
+
+### Cohort2 Plots
+#### Minimum Crea before Sample
+```{r}
+MinCreatinine_cohort2 <- CreatinineTable %>% filter(Ascertainment_Tx_diffs > 0) %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% cohort2_Ids), by="PatientID") %>% mutate(Ascertainment_Sample_diffs = Ascertainment_Date - SampleDate ) %>% filter(Ascertainment_Sample_diffs <= 0) %>% group_by(SampleID) %>%  slice_min(CreatinineFinal) 
+
+
+MinCreatinine_cohort2 %>% filter(SampleID %in% in_samples & SampleID != "T024769_S169") %>% distinct(SampleID, CreatinineFinal,rej) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection"))%>% ggplot( aes(x=rej, y=CreatinineFinal, fill=rej)) + geom_boxplot() + stat_compare_means(size=5,label.x.npc = "center") + ylab("Minimum Creatinine") + xlab("")  + theme(legend.position = "none") + ylim(0,9)
+
+MinCreatinine_cohort2 %>% filter(SampleID %in% in_samples & SampleID != "T024769_S169") %>% distinct(SampleID, CreatinineFinal,rej) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection"))%>% ggplot( aes(x=rej, y=CreatinineFinal, fill=rej)) + geom_boxplot() + stat_compare_means(size=5,label.x.npc = "center") + ylab("Minimum Creatinine") + xlab("")  + theme(legend.position = "none") 
+
+ CreatinineTable %>% filter(Ascertainment_Tx_diffs > 0) %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% cohort2_Ids), by="PatientID") %>% mutate(Ascertainment_Sample_diffs = Ascertainment_Date - SampleDate ) %>% filter(Ascertainment_Sample_diffs > 0)  %>% filter(SampleID %in% in_samples) %>% group_by(SampleID) %>%  slice_min(CreatinineFinal) %>% distinct(PatientID, CreatinineFinal,rej) %>%
+ ggplot( aes(x=rej, y=CreatinineFinal, fill=rej)) + geom_boxplot() + stat_compare_means(size=5,label.x.npc = "center") + ylab("Minimum Creatinine") + xlab("")  + theme(legend.position = "none") 
+
+```
+#### Last Available Crea
+
+```{r}
+LastAvailCreas<- CreatinineTable %>% filter(Ascertainment_Tx_diffs > 0 & PatientID %in% in_patients) %>% distinct() %>% group_by(PatientID) %>% slice_max(Ascertainment_Tx_diffs)
+
+
+lastavail_crea_plot<- ggplot(LastAvailCreas, aes(x=rej, fill=rej, y=CreatinineFinal)) + geom_boxplot()  + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5) + ylab("Last Available Creatinine after KT") + xlab("")  + 
+  scale_x_discrete(labels=c("0"="Non Rejection", "1"="Rejection"))+
+  scale_fill_manual(na.translate = F,  values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+   # axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=11),
+    axis.title.y  =element_text(size=11),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) 
+
+LastAvailCreas %>% ungroup() %>% group_by(rej) %>% summarise(mean=mean(Ascertainment_Tx_diffs), median=median(Ascertainment_Tx_diffs), sd=sd(Ascertainment_Tx_diffs))
+
+ggsave("../plots/Figure3/C2_LastAvailableCrea.pdf", width = 5.5, height=3.5)
+
+```
+
+
+
+## Creating Variables for Crea
+```{r}
+allCreatinine_c2 <- CreatinineTable %>% full_join(basic.info %>% filter(SampleID %in% cohort2_Ids) %>% select(SampleID, PatientID, Sample_Date=Date),., by="PatientID") %>%  mutate(Ascertainment_Sample_diffs=  Ascertainment_Date- Sample_Date, .after=Ascertainment_Date) %>% select(-PatientID,-Ascertainment_Date, -Sample_Date,-rej)%>%
+  group_by(SampleID) %>% mutate(row = row_number()) %>% rename(Creatinine=CreatinineFinal) %>%
+   tidyr::pivot_wider(names_from = row, values_from = c( Ascertainment_Sample_diffs, Ascertainment_Tx_diffs, Ascertainment_Event_diffs,  Creatinine,Creatinine_Critical))
+```
+
+
+```{r}
+mean_creatinine_c2<- CreatinineTable %>% full_join(basic.info %>% filter(SampleID %in% cohort2_Ids) %>% select(SampleID, PatientID, Sample_Date=Date),., by="PatientID") %>%  mutate(Ascertainment_Sample_diffs=  Ascertainment_Date- Sample_Date, .after=Ascertainment_Date) %>% group_by(SampleID,rej) %>% summarise(
+  mean_total_crea= mean(CreatinineFinal[Ascertainment_Tx_diffs >5], na.rm=T),
+  
+  mean_before_sample_crea= mean(CreatinineFinal[Ascertainment_Sample_diffs <=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  min_before_sample_crea= min(CreatinineFinal[Ascertainment_Sample_diffs <=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  max_before_sample_crea= max(CreatinineFinal[Ascertainment_Sample_diffs <=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+
+  mean_after_sample_crea= mean(CreatinineFinal[Ascertainment_Sample_diffs >0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  min_after_sample_crea= min(CreatinineFinal[Ascertainment_Sample_diffs >0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  max_after_sample_crea= max(CreatinineFinal[Ascertainment_Sample_diffs >0 & Ascertainment_Tx_diffs >0], na.rm=T),
+
+  
+  mean_before_rej_crea=mean(CreatinineFinal[Ascertainment_Event_diffs < 0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  min_before_rej_crea= min(CreatinineFinal[Ascertainment_Event_diffs < 0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  max_before_rej_crea= max(CreatinineFinal[Ascertainment_Event_diffs < 0 & Ascertainment_Tx_diffs >0], na.rm=T),
+
+  mean_after_rej_crea= mean(CreatinineFinal[Ascertainment_Event_diffs >=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  min_after_rej_crea= min(CreatinineFinal[Ascertainment_Event_diffs >=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+  max_after_rej_crea= max(CreatinineFinal[Ascertainment_Event_diffs >=0 & Ascertainment_Tx_diffs >0], na.rm=T),
+
+)
+
+
+mean_creatinine_c2[sapply(mean_creatinine_c2, is.nan )] <- NA
+mean_creatinine_c2[sapply(mean_creatinine_c2, is.infinite )] <- NA
+
+  
+mean_creatinine_c2 %>% select(SampleID, rej, ends_with("sample_crea"))  %>% gather("bef_aft", "val", mean_before_sample_crea, mean_after_sample_crea ) %>% ggplot(aes(y=val, fill=bef_aft, x=rej)) + geom_boxplot() + ylim(0,6) + stat_compare_means() 
+
+mean_creatinine_c2 %>% filter(rej ==1)  %>% gather("bef_aft", "val", mean_before_rej_crea, mean_after_rej_crea ) %>% ggplot(aes(y=val, x=bef_aft, fill=rej)) + geom_boxplot() + ylim(0,6) + stat_compare_means() 
+
+```
+
+
+

@@ -1,0 +1,429 @@
+---
+title: "Comparison Reference CKD study & DZIF Rejection"
+output: html_notebook
+---
+
+#1. CKD Study
+
+## 1.0 Reading Files
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(metadeconfoundR)
+
+load("../other_proj_phyloseq.Rdata")
+
+reference_physeq <- physeq
+
+srr_list <- rownames(sample_data(reference_physeq))
+
+```
+
+
+```{r}
+## taking only discovery cohort, clincial data but only from the first publication
+#ADVS_clinical_data <- read_csv("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Rosa/tables/ADVS-7-2001936-s003.csv")
+#ADVS_clinical_data
+
+## mapping SRR to SRA and sample name
+mapping_SRR_sample <- read_csv("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Rosa/tables/mapping_SRR_sample.csv")
+all_697_SRR_mapping <- mapping_SRR_sample %>% mutate(sample= gsub("zz|hz|Mobio_ZZ_", "", sample)) %>% mutate(grp=sub("^(.*?)_(.*?)$", "\\1", sample))
+table(all_697_SRR_mapping$grp)
+
+
+```
+
+
+```{r}
+
+all_697_SRR_mapping <- all_697_SRR_mapping %>% filter( SRR_ID %in% rownames(data.frame(sample_data(reference_physeq)))) 
+
+rownames(all_697_SRR_mapping) <- all_697_SRR_mapping$SRR_ID
+
+## get exact order
+correct_order <- rownames(sample_data(reference_physeq))
+all_697_SRR_mapping<- all_697_SRR_mapping[match(correct_order, all_697_SRR_mapping$SRR_ID),]
+
+
+class(all_697_SRR_mapping) <- "data.frame"
+
+
+sample_data(reference_physeq) <- all_697_SRR_mapping
+
+sample_data(reference_physeq)
+```
+
+
+
+## 1.1 Alpha Diversity
+```{r}
+reference_not_rar_alphas <-  microbiome::alpha(prune_taxa(taxa_sums(reference_physeq) >0, reference_physeq), index="all")
+
+
+reference_not_rar_alphas <- cbind(all_697_SRR_mapping , reference_not_rar_alphas)
+```
+
+
+```{r}
+reference_not_rar_alphas %>% select(grp, observed, diversity_shannon,evenness_simpson) %>% gather("metric", "value", observed, diversity_shannon,evenness_simpson ) %>% mutate(metric=factor(metric, levels=c( "observed", "diversity_shannon","evenness_simpson"))) %>%
+  
+  ggplot(aes(x=grp,y=value, fill=grp)) + 
+    scale_fill_manual( values=c( "#BC3C29FF","#0072B5FF"))+
+    geom_boxplot(color="black") +
+ geom_jitter(widht=0.2,size=1.0) + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=5,label.x.npc = "center", label= "p.format" ) +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=15),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) + 
+  facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("observed" = "observed OTUs",
+      "diversity_shannon" = "Shannon Index",
+     "evenness_simpson"= "Simpson Evenness") )) 
+  
+
+
+```
+
+
+##1.2 beta diversity 
+
+```{r}
+dzif_otutable <- as.matrix(otu_table(physeq))
+reference_otutable <- as.matrix(otu_table(reference_physeq))
+
+
+merged_otu_table <- merge(dzif_otutable, reference_otutable , by = "row.names")
+
+dim(merged_otu_table)
+
+rownames(merged_otu_table) <- merged_otu_table$Row.names
+merged_otu_table$Row.names <- NULL
+# Replace NA values with 0
+#merged_otu_table[is.na(merged_otu_table)] <- 0
+
+# Create a new phyloseq object with the merged OTU count table
+merged_physeq <- phyloseq(otu_table(merged_otu_table, taxa_are_rows = TRUE), tax_table(reference_physeq))
+
+sample_data(merged_physeq)
+
+merged_sampledata <- data.frame(SampleID= names(merged_otu_table))
+
+DZIF_group <- extended.basic.info %>% mutate(group = case_when(origin=="Spender" ~ "donor", rej==0 ~ "Non Rejection", T ~ "Rejection"  )) %>% select(SampleID, group)
+
+merged_sampledata<- merged_sampledata %>% mutate(dataset= case_when(startsWith(SampleID, "T")~ "DZIF", T ~ "Reference")) %>% left_join(DZIF_group, by="SampleID") %>% full_join(reference_clin_data %>% select(SampleID,CKD_HC), by="SampleID") %>% mutate(group= case_when(is.na(group)~ CKD_HC, T ~ group)) %>% select(-CKD_HC)
+
+rownames(merged_sampledata) <- merged_sampledata$SampleID
+class(merged_sampledata) <- "data.frame"
+
+sample_data(merged_physeq) <- merged_sampledata
+
+
+```
+
+
+##1.3 beta diversity Ref & DZIF
+
+```{r}
+bray_ordination_merged <- ordinate(merged_physeq, method="PCoA", distance="bray")
+```
+
+
+```{r}
+plot_ordination(merged_physeq, bray_ordination_merged , color="group") +   
+  geom_point(size=2.3, aes(color=group)) +
+   theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=10),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )  +
+  stat_ellipse() + # Add ellipses
+
+  # Add centroids
+  geom_point(data = create_centroid_data(bray_ordination_merged, merged_sampledata, "group"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=group), size = 5, shape=22, color="black") 
+```
+
+## 1.4 metadeconfoundR
+
+###1.4.1 on dzif signif genera
+```{r}
+reference_physeq 
+
+## prep meta input
+ ref_696_metadata_input <- data.frame(sample_data(reference_physeq)) %>% select(grp) %>% mutate(grp=case_when(grp=="HC" ~0, T ~1)) 
+
+table( ref_696_metadata_input$grp)
+
+## get genera counts
+genus_table <- get_count_table(path="../../SRA_otherprojects/Lotus2HG38SLV138/higherLvl/Rarefaction/", rank="Genus", filter=F, samplelist = rownames(ref_696_metadata_input ))
+
+genus_table  <- data.frame(t(genus_table)) %>% rownames_to_column("feature")
+
+## set to the significant of C2 comparison
+genus_table<- genus_table %>% filter(feature %in% DZIF_signif_genus$feature)
+
+## fall outs 
+not_in_ckddataset_genus <- DZIF_signif_genus %>% filter(!feature %in% genus_table$feature)
+
+# final feature input : selected genera + alpha diversities
+ref.ckd.feature.input <- genus_table %>% rbind(data.frame(t(reference_not_rar_alphas %>% select(diversity_shannon, observed, evenness_simpson))) %>% rownames_to_column("feature"))
+
+ref.ckd.feature.input <- as.data.frame(t(ref.ckd.feature.input %>% column_to_rownames("feature")))
+
+# check before running
+all(order(rownames(ref.ckd.feature.input)) == order(rownames(ref_696_metadata_input)))
+all(order(rownames(ref_696_metadata_input)) == order(rownames(ref.ckd.feature.input)))
+
+# run it 
+reference_696_metadeconfound_output <- MetaDeconfound(ref.ckd.feature.input, ref_696_metadata_input %>% mutate(random=rnorm(696)), returnLong = T)
+```
+
+### 1.4.2 on all genera
+```{r}
+## run it for all genera, no filtering: mean abundance=0.05, mean prevalence = 0.1 
+
+reference_696_metadeconfound_allgenera_output <- MetaDeconfound( 
+get_count_table(path="../../SRA_otherprojects/Lotus2HG38SLV138/higherLvl/Rarefaction/", rank="Genus", filter=F, samplelist = rownames(ref_696_metadata_input )),
+ref_696_metadata_input %>% mutate(random=rnorm(696)), returnLong = T)
+```
+
+
+
+
+
+#2. Comparison with DZIF
+
+##2.1 dzif rej run 
+ red.cohort2.genus.output,  red.cohort2.meta.input of prepMasterTable_paperRun.Rmd
+ 
+```{r}
+DZIF_signif_genus <- red.cohort2.genus.output %>% filter(Qs < 0.1 & metaVariable=="rej")
+
+not_rar_alphas %>% filter(SampleID %in% in_samples) %>%  select(observed, diversity_shannon, evenness_simpson)
+
+
+
+dzif.feature.input <- as.data.frame(t(get_count_table(path, "Genus", filter=T, samplelist=in_samples))) %>% rownames_to_column("feature")%>% rbind( data.frame(t(not_rar_alphas %>% filter(SampleID %in% in_samples) %>% ungroup() %>% column_to_rownames("SampleID") %>%  select(observed, diversity_shannon, evenness_simpson))) %>% rownames_to_column("feature"))
+                                                                                                
+                                                                                                
+                                                                                             
+
+dzif_metadeconfound_output <- MetaDeconfound(as.data.frame(t(dzif.feature.input %>% column_to_rownames("feature") )) ,
+                                                      red.cohort2.meta.input %>% select(rej,age), returnLong = T)
+
+
+
+```
+##2.2 dzif pre kt run 
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+```{r}
+dzif_preKT.feature.input <- as.data.frame(t(get_count_table(path, "Genus", filter=F, samplelist=c(preKT_samples, donor_ids)))) %>% rownames_to_column("feature")%>% filter(feature %in% DZIF_signif_genus$feature) %>% rbind( data.frame(t(not_rar_alphas %>% filter(SampleID %in% c(preKT_samples, donor_ids)) %>% ungroup() %>% column_to_rownames("SampleID") %>%  select(observed, diversity_shannon, evenness_simpson))) %>% rownames_to_column("feature")) 
+                                                                                                
+dzif_preKT_metadeconfound_output <- MetaDeconfound(as.data.frame(t(dzif_preKT.feature.input %>% column_to_rownames("feature") )) ,
+                                                      basic.info %>% filter(SampleID %in%  c(preKT_samples, donor_ids)) %>% select(origin, age) %>% mutate(origin=case_when(origin=="Spender"~0, T ~1)), returnLong = T)
+
+
+```
+
+##2.3 Visualization: Heatmap Ds
+```{r}
+## reference run + adding missing genera with 0 and non significant 
+reference_hmp <- reference_696_metadeconfound_output %>%  filter(metaVariable == "grp") %>% rbind(data.frame(feature=not_in_ckddataset_genus$feature, metaVariable="grp", Ps=0, Qs=0, Ds=0, status="NS"))
+
+dzif_hmp <- dzif_metadeconfound_output %>% filter(metaVariable == "rej")
+
+dzif_preKT_hmp <- dzif_preKT_metadeconfound_output %>% filter(metaVariable == "origin")
+```
+
+
+```{r}
+mat_breaks <- quantile_breaks( rbind(dzif_hmp,reference_hmp)$Ds , n = 11)
+
+colors <- rev(brewer.pal(length(mat_breaks) - 1, "PiYG") ) # PiYG palette from RColorBrewer
+colors[6] <- "white"
+
+colors <- rev(c(brewer.pal(10, "PiYG")[1:5], "white", brewer.pal(10, "PiYG")[6:10]))  # Custom color palette
+
+## quantile color scheme
+prettify_heatmap( rbind(dzif_hmp,reference_hmp)
+  , mvs = data.frame(machine=c("grp", "rej"), human=c("CKD/HC","DZIF rej") )  ) + scale_fill_distiller(palette="PiYG")+  scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus %>% arrange(Ds) %>%pull(feature) )))  ) +   scale_fill_gradientn(colours = colors, breaks = mat_breaks, limits = c(min(mat_breaks), max(mat_breaks)), labels=round(mat_breaks,2)) + theme(legend.key.height = unit(1.7, "cm"))
+```
+
+
+```{r}
+# unchanged color scheme , unknown filtered out 
+prettify_heatmap( rbind(dzif_hmp,reference_hmp) %>% filter(!grepl("unknown", feature,fixed=T) & !grepl("incertae", feature,fixed=T))
+  , mvs = data.frame(machine=c("grp", "rej"), human=c("CKD/HC","DZIF rej") )  ) + scale_fill_distiller(palette="PiYG") +  scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus  %>% filter(!grepl("unknown", feature,fixed=T) & !grepl("incertae", feature,fixed=T)) %>% arrange(Ds) %>%pull(feature) )))  )
+  
+#ggsave("../plots/Reference_CKD/Ref_DZIF_heatmap_unchanged_colorscheme_unknown_out.pdf", width = 10,height=7.5)
+```
+
+
+```{r}
+# unchanged color scheme 
+
+prettify_heatmap( rbind(dzif_hmp,reference_hmp), mvs = data.frame(machine=c("grp", "rej"), human=c("CKD/HC","DZIF rej") )  ) + scale_fill_distiller(palette="PiYG") +  scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus  %>% arrange(Ds) %>%pull(feature) )))  )
+  
+#ggsave("../plots/Reference_CKD/Ref_DZIF_heatmap_unchanged_colorscheme.pdf", width = 10,height=9.5)
+
+# with pre KT comparison
+prettify_heatmap( rbind(dzif_hmp,reference_hmp,dzif_preKT_hmp) %>% mutate(Ds=scale(Ds)),  keepMeta=c("origin")
+  , mvs = data.frame(machine=c("grp", "rej", "origin"), human=c("CKD/HC","DZIF rej", "DZIF preKT") )  )  + scale_fill_distiller(palette = "PiYG") + scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus %>% arrange(Ds) %>%pull(feature) )))  ) 
+```
+
+
+##2.4 save table 
+```{r}
+
+write.table(dzif_hmp %>% filter(status!="NS" | feature %in% c("observed", "diversity_shannon", "evenness_simpson")) %>% mutate(metaVariable="DZIF") %>% rbind(reference_hmp %>% mutate(metaVariable= "Reference"))
+, "../plots/Reference_CKD/DZIF_Reference_metadeconfound_output.tsv", sep="\t", quote = F, col.names = T, row.names = F, na="")
+```
+
+
+
+##2.5 log fold changes 
+```{r}
+
+foldchanges_dzif <- as.data.frame(t(dzif.feature.input %>% column_to_rownames("feature") )) %>% rownames_to_column("SampleID") %>% left_join(basic.info %>% filter(SampleID %in% in_samples) %>% distinct(SampleID,rej), by="SampleID") %>% group_by(rej) %>% select(-SampleID, -rej) %>% summarise(across(everything(), mean)) %>% t() %>% as.data.frame() %>% rownames_to_column("feature") %>% rename("Non Rejection"=V1, "Rejection"=V2) %>% filter(feature !="rej")
+
+foldchanges_dzif <- data.frame(feature=foldchanges_dzif$feature, log2FC= log2( (as.numeric(foldchanges_dzif $Rejection) +0.0001)/(as.numeric(foldchanges_dzif$`Non Rejection`)+0.0001) ))
+
+
+foldchanges_ref<- ref.ckd.feature.input %>% rownames_to_column("SRR_ID") %>% left_join(ref_696_metadata_input %>% rownames_to_column("SRR_ID"), by="SRR_ID") %>% group_by(grp) %>% select(-SRR_ID, -grp) %>% summarise(across(everything(), mean)) %>% t() %>% as.data.frame() %>% rownames_to_column("feature") %>% rename("HC"=V1, "CKD"=V2) %>% filter(feature !="grp")
+
+
+foldchanges_ref <- data.frame(feature=foldchanges_ref$feature, log2FC= log2( (as.numeric(foldchanges_ref$CKD) +0.0001)/(as.numeric(foldchanges_ref$HC)+0.0001) ))
+
+foldchanges_ref<- foldchanges_ref %>% rbind(data.frame(feature=not_in_ckddataset_genus$feature, log2FC=0))
+
+summary(foldchanges_dzif)
+summary(foldchanges_ref)
+
+
+quantile_breaks <- function(xs, n = 10) {
+  breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+  breaks[!duplicated(breaks)]
+}
+
+
+  
+fc_heatmap_ref_dzif <- foldchanges_ref %>% mutate(dataset="ref") %>% rbind(foldchanges_dzif %>% filter(feature %in% foldchanges_ref$feature) %>% mutate(dataset="dzif")) %>% mutate(feature= (sub(".*\\;", "",feature)))
+
+mat_breaks <- quantile_breaks(fc_heatmap_ref_dzif$log2FC  , n = 11)
+
+
+ggplot(fc_heatmap_ref_dzif %>% mutate(log2FC= case_when(log2FC < -4.5~ -4.5, log2FC >4.5 ~ 4.5, T ~ log2FC)), aes(fill=(log2FC), y= feature, x=dataset)) + geom_tile() + scale_fill_distiller(palette = "PiYG")  +
+  scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus %>% arrange(Ds) %>%pull(feature) ))) 
+)
+
+```
+
+##2.6 Abundance Boxplots
+
+```{r}
+as.data.frame(t(dzif.feature.input %>% mutate(feature=sub(".*\\;", "",feature) ) %>% filter(feature %in% c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus")) %>% column_to_rownames("feature"))) %>% cbind( red.cohort2.meta.input %>% mutate(rej=case_when(rej==0 ~"Non\nRejection", T~"Rejection")) %>% select(grp=rej),.) %>% 
+rbind(ref.ckd.feature.input %>% select(ends_with(c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus"))) %>% rename_with(~sub(".*\\;", "",.x)) %>% cbind(ref_696_metadata_input %>% mutate(grp= case_when(grp==0 ~ "HC", T~"CKD")),.)) %>%
+gather( "feature", "count",-grp) %>% mutate(grp=factor(grp, levels=c("HC", "CKD", "Non\nRejection", "Rejection"))) %>%
+  ggplot(aes(x=grp, y=log(count + 1), fill=grp)) + geom_boxplot(color="black") + facet_wrap(~feature, scales="free_y") + 
+  xlab("")  + ylab("log2(count +1)") + 
+ #  geom_jitter(width=0.2,size=0.7) +
+  stat_compare_means(size=3,label.x.npc = "center", comparisons=list(c("HC","CKD"), c("Non\nRejection", "Rejection")),label= "p.format") +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=11),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) +
+    scale_fill_manual( values=c(  "midnightblue","orangered", "#0072B5FF","#BC3C29FF")) 
+
+#ggsave("../plots/Reference_CKD/DZIF_Ref_Bugs_abund_plots.pdf", width=8.5, height=6.5)
+
+
+```
+
+##2.7 Double Volcano 
+```{r}
+genera_intersect<- intersect(red.cohort2.genus.output$feature, reference_696_metadeconfound_allgenera_output$feature)
+
+red.cohort2.genus.output %>% filter(metaVariable=="rej" & feature %in% genera_intersect & Qs <0.1)
+
+bacteria=c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus")
+inner_join(red.cohort2.genus.output %>% filter(metaVariable=="rej") ,reference_696_metadeconfound_allgenera_output %>% filter(metaVariable=="grp") %>% rename(Ds2=Ds, Qs2=Qs) %>% select(Ds2,Qs2, feature), by="feature") %>% mutate(feature=sub(".*\\;", "", feature)) %>% mutate(annotate=case_when(feature %in% bacteria ~ feature, T~NA)) %>%
+ ggplot(aes(x=Ds, y=Ds2)) + geom_point()  + 
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=9),
+    axis.title.y  =element_text(size=9),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )  + stat_cor(method = "spearman", label.x = -0.55, label.y = 0.55) + ylim(-0.55,0.55) + xlim(-0.55,0.55) +  ylab("CKD Reference Cliff's Delta") + xlab("DZIF Reference Cliff's Delta")  + geom_text_repel( aes(label=annotate),size=3 , vjust = -1,colour="black",min.segment.length = unit(0, 'lines'), 
+                     nudge_y = .134)
+
+ggsave("../plots/Reference_CKD/DZIF_Ref_DoubleVolcano.pdf", width=6, height=4)
+
+
+write.table(inner_join(red.cohort2.genus.output %>% filter(metaVariable=="rej") %>% rename(C2_Ds=Ds, C2_Ps=Ps, C2_Qs=Qs) %>% select(-metaVariable,-status) ,reference_696_metadeconfound_allgenera_output %>% filter(metaVariable=="grp") %>% rename(Ref_Ds=Ds, Ref_Ps=Ps, Ref_Qs=Qs) %>% select(Ref_Ps, Ref_Qs,Ref_Ds, feature), by="feature") %>% rename(feature_long=feature)%>% mutate(feature=sub(".*\\;", "", feature_long), .after=feature_long) 
+, "../plots/Reference_CKD/DZIF_Reference_metadeconfound_output.tsv", sep="\t", quote = F, col.names = T, row.names = F, na="")
+
+```
+
+
+
+

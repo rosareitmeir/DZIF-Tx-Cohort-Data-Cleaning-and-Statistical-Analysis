@@ -1,0 +1,891 @@
+---
+title: "Immunosupressive Drug Processing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement 
+
+## Reading Filtered Tables 
+
+```{r}
+mergeContainer <- read.csv("../Oct22/all_files_containing_patient_information/filtered/mergeContainer.tab", sep="\t", header=T)
+mergePatient <- read.csv("../Oct22/all_files_containing_patient_information/filtered/mergePatientID.tab", sep="\t", header=T)
+
+colnames(mergeContainer)
+```
+
+###  G945MJK9 with 108 rows !
+```{r}
+G945MJK9_df <- mergeContainer %>% filter(PatientID == "G945MJK9")
+#distinct(as.data.frame(t( G945MJK9_df)))
+
+#distinct(as.data.frame(t(G945MJK9_df$Container)))
+
+filtered.col <- t(as.data.frame(t( G945MJK9_df)) %>% rowwise() %>%  filter(!all(c_across(everything()) == first(c_across(everything())))) %>% ungroup())
+
+## in fact all different entries due to an infection and different treatments 
+(as.data.frame(filtered.col) %>% distinct())
+
+```
+
+### General Checks 
+
+any intersection container and sample container ? -> no 
+```{r}
+basic.info %>% select(PatientID, SampleID=name, Container) %>% filter(Container %in%  mergeContainer$Container)
+basic.info %>% select(PatientID, SampleID=name, Container) %>% filter(PatientID %in%  mergeContainer$PatientID)
+
+## "intresting" dates if matching with continer is not working 
+mergeContainer %>% select(contains("date") & !contains("AGE")) %>% colnames()
+```
+
+## Immunosuppressive Drugs 
+There are three different sources: LabBio Files for each drug and from Niere: 1.3.1 BL info and 2.4 Follow Up info 
+
+
+### 1.3.1
+
+```{r}
+
+
+ImContainer <- mergeContainer %>% select(contains( "Im."), contains("FU-Im"), Container, PatientID)
+
+#colnames(ImContainer)
+
+#unique(ImContainer$PatientID)
+
+# filtering out patients with no samples and keeping only one row per patient to get the correct proportion , 231 = total number of patients 
+covered_props <- colSums(!is.na(ImContainer %>% filter(PatientID %in% patientIDs) %>% distinct(PatientID, .keep_all = TRUE)
+))/231
+
+covered_props
+
+# Filter columns based on the threshold
+drug_coverageContainer <- ImContainer[, covered_props >= 0.2]
+
+colnames(drug_coverageContainer)
+
+###   "hdSteroids.BL.Im.NeBIm.High.dosesteroids1mgkg"   "dose.hdSteroids.BL.Im.NeBIm"              
+#"Tacrolimus.BL.Im.NeBIm.Tacrolimus" , "dose.Tacrolimus.BL.Im.NeBIm", "lowTarget.Tacrolimus.BL.Im.NeBIm", "upTarget.Tacrolimus.BL.Im.NeBIm"  "actLevel.Tacrolimus.BL.Im.NeBIm"                        
+# "Mycophenolatmofetil.BL.Im.NeBIm.Mycophenolat.MofetilMMF" "dose.MMF.BL.Im.NeBIm"
+
+```
+With a low coverage of 20%: Steroids, Tacrolimus and Mycophenolatmofetil remain 
+
+
+### 2.4 Follow Up 
+
+
+```{r}
+library(readr)
+FU.ImmunosupDrugs <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/filtered/2.4ImmunosuppressiveDrugs_filtered.csv", 
+                                 delim = ";", escape_double = FALSE, trim_ws = TRUE, show_col_types = FALSE)
+
+
+FU.ImmunosupDrugs <- FU.ImmunosupDrugs %>% filter((PatientID %in% patientIDs))
+
+FUcovered_props <- colSums(!is.na(distinct(FU.ImmunosupDrugs, PatientID, .keep_all = TRUE) ))/231
+
+FUcovered_props
+
+
+
+```
+
+Also here not a lot of info, rather info for Steroids, MMF and Tacrolimus
+
+### LabBio 
+
+15 different files for each drug, 2 of them empty 
+
+```{r}
+# List files starting with "Imm"
+file_list <- list.files("../../Oct22/all_files_containing_patient_information/filtered", pattern = "^Imm", full.names = TRUE)
+
+## the two empty files 
+file_list <- file_list[!grepl(paste(c("Immunosuppre-drugXdaclizumab_filtered", "Immunosuppres-drugXmuromonab_filtered"), collapse = "|"), file_list)]
+
+# Read in the files
+data_list <- lapply(file_list, read.csv2) 
+
+
+drug_coverage <- lapply( data_list, function(x) { filter(x, PatientID %in% patientIDs) %>% pull(PatientID) %>% unique()})
+names(drug_coverage) <- gsub("_filtered.csv$", "", basename(file_list))
+
+
+lengths(drug_coverage)/231
+
+
+drug_coverage<- drug_coverage[lengths(drug_coverage) >= 0.75*231] 
+
+
+names(drug_coverage)
+```
+
+### Matching Drugs to Samples 
+
+```{r}
+SampleDates <- basic.info %>% select(PatientID, SampleID=name, SampleDate=OS_DatumSonstiges_Sonst_BioSa, Container) %>% filter(! is.na(SampleDate))
+```
+
+
+#### 1.3.1 merge 
+```{r}
+inner_join(ImContainer, SampleDates, by= c("Container", "PatientID"))
+
+matchSampleDrug <- ImContainer %>% distinct()  %>% filter(!is.na(doseAdjustDate.BL.Im.NeBIm)) %>% left_join(SampleDates, by = "PatientID")  %>% filter(SampleDate >= doseAdjustDate.BL.Im.NeBIm) %>% relocate(SampleID, PatientID, SampleDate, .before = doseAdjustDate.BL.Im.NeBIm)
+
+matchSampleDrug
+
+## adding all samples with no info yet 
+
+matchSampleDrug <- full_join(matchSampleDrug, SampleDates, by= c("SampleID", "PatientID", "SampleDate"))
+
+
+
+```
+
+#### 2.4 FU merge 
+
+```{r}
+inner_join(FU.ImmunosupDrugs, SampleDates, by= c("Container", "PatientID"))
+
+FU.ImmunosupDrugs <- FU.ImmunosupDrugs %>% mutate(FU.doseAdjustDate = as.Date(`doseAdjustDate-FU-Im-NeFIm`, format = "%d.%m.%Y")) %>% relocate(FU.doseAdjustDate, .before = `doseAdjustDate-FU-Im-NeFImAGEForVariable`) 
+
+# first part is to merge rows with the same adjust date together, keeping all information ( often no intersections)
+# second part: match the sample to the closest adjustment date, but adjust date must be strictly before  the sample was taken 
+FU.matches<- FU.ImmunosupDrugs%>%
+   filter(!is.na(FU.doseAdjustDate)) %>%
+  group_by(PatientID, FU.doseAdjustDate) %>% 
+  summarise_all(~paste(unique(.[!is.na(.)]), collapse = ";")) %>%
+  
+  left_join(SampleDates, by = "PatientID") %>%
+  group_by(PatientID, SampleID, SampleDate) %>% mutate(help.dif=  as.Date(SampleDate)- as.Date(FU.doseAdjustDate) ) %>% 
+filter(help.dif >=0) %>% slice_min(help.dif) %>% relocate(SampleID, PatientID, help.dif, SampleDate, .before = FU.doseAdjustDate)
+
+
+matchSampleDrug<- full_join(matchSampleDrug, select(FU.matches, -help.dif, FU.doseAdjustDate), by= c("PatientID", "SampleID", "SampleDate"))
+
+```
+
+#### LabBio Drug infos
+
+```{r}
+
+for (drugtable in data_list[-length(data_list)]) {
+  datecol <- drugtable %>% select( AdjustDate=ends_with("adjustDate.sfIsd.Immun"))
+ 
+  drugtable <- cbind( AdjustDate=drugtable[, endsWith(colnames(drugtable),"adjustDate.sfIsd.Immun")], drugtable)
+  
+  
+matches<- drugtable %>% 
+  filter(!is.na(AdjustDate) & (AdjustDate!="")) %>%
+  group_by(PatientID, AdjustDate) %>% 
+  summarise_all(~paste(unique(.[!is.na(.)]), collapse = ";")) %>%
+
+  left_join(SampleDates, by = "PatientID") %>%
+  group_by(PatientID, SampleID, SampleDate) %>% mutate(help.dif=  as.Date(SampleDate)- as.Date(AdjustDate, format = "%d.%m.%Y") ) %>% 
+filter(help.dif >=0) %>% slice_min(help.dif) %>% relocate(SampleID, PatientID, help.dif, SampleDate, .before = AdjustDate)
+
+  
+ matchSampleDrug<- full_join(matchSampleDrug, select(matches, -help.dif, -AdjustDate), by= c("PatientID", "SampleID", "SampleDate"))
+
+}
+
+cleaned.matchSampleDrug <- matchSampleDrug %>% select(-matches(paste(c("Container", "Datum", "Status", "Dokument"), collapse="|")))
+colnames( cleaned.matchSampleDrug)
+cleaned.matchSampleDrug
+
+
+write.table(cleaned.matchSampleDrug, "matchedDrugtoSample.tsv", sep="\t", quote=F, col.names = T, row.names = F)
+```
+
+
+final dataframe: 
+from all available drug tables, i assigned the drug entry with the smallest time distance to the sample
+
+next steps: 
+- what to keep? difference between follow ups, bl and labbio 
+- doing more filtering and keeping the entry from those three categories with the smallest distance overall for steroids, tacro and mmf
+
+
+#### Overall best match for the triple treatment drugs 
+```{r}
+triple.treatment <- select(cleaned.matchSampleDrug, PatientID, SampleID, SampleDate, doseAdjustDate.BL.Im.NeBIm, FU.doseAdjustDate,  contains("steroid") | contains("Tacrolimus") | contains("mycophenolatmofetil")) %>% select (- contains("AGE"))
+
+
+create_single_drugtable <- function(drugname){
+  drug.table <- triple.treatment %>% select(PatientID, SampleID, SampleDate, doseAdjustDate.BL.Im.NeBIm, FU.doseAdjustDate, contains(drugname))
+
+  sfisd.colname <- paste(drugname, "adjustDate.sfIsd.Immun", sep="")
+  
+drug.table <- drug.table %>% group_by(PatientID, SampleDate, SampleID) %>% mutate( BL.dist=  as.Date(SampleDate) - doseAdjustDate.BL.Im.NeBIm , FU.dist= as.Date(SampleDate) - FU.doseAdjustDate, sfIsd.dist= as.Date(SampleDate)- as.Date(!!as.name(sfisd.colname), format = "%d.%m.%Y" )) %>% mutate(min.entry= case_when(
+  min(BL.dist, FU.dist, sfIsd.dist, na.rm=T) == BL.dist ~ "BL",
+  min(BL.dist, FU.dist, sfIsd.dist, na.rm=T) == FU.dist ~ "FU",
+  min(BL.dist, FU.dist, sfIsd.dist, na.rm=T) == sfIsd.dist ~ "sfISd",
+  T ~ ""
+
+  
+), min.dist=  min(BL.dist, FU.dist, sfIsd.dist, na.rm=T) )
+
+  return(drug.table)
+}
+
+
+steroid.table <- create_single_drugtable("steroids")
+tacro.table <- create_single_drugtable("tacrolimus")
+mmf.table <- create_single_drugtable("mycophenolatmofetil")
+
+
+ggplot(tacro.table, aes(x=min.entry, y=as.double(min.dist))) + geom_boxplot() + scale_x_discrete(limits=c("BL", "FU", "sfISd")) + ylim(c(0,300))
+ggplot(steroid.table, aes(x=min.entry, y=as.double(min.dist))) + geom_boxplot() + scale_x_discrete(limits=c("BL", "FU", "sfISd")) + ylim(c(0,300))
+ggplot(mmf.table, aes(x=min.entry, y=as.double(min.dist))) + geom_boxplot() + scale_x_discrete(limits=c("BL", "FU", "sfISd")) + ylim(c(0,300))
+
+table(tacro.table$min.entry)
+table(steroid.table$min.entry)
+table(mmf.table$min.entry)
+
+write.table(tacro.table, "MetaDataProcessing/Minimal_Distance_Tacrolimus.tsv", sep="\t", na= "", row.names=F, col.names = T, quote=F)
+write.table(steroid.table, "MetaDataProcessing/Minimal_Distance_Steroid.tsv", sep="\t", na= "", row.names=F, col.names = T, quote=F)
+write.table(mmf.table, "MetaDataProcessing/Minimal_Distance_MMF.tsv", sep="\t", na= "", row.names=F, col.names = T, quote=F)
+
+
+
+
+ggplot(rbind(data.frame(distance=steroid.table$min.dist, drug=rep("Steroid", nrow(steroid.table))), 
+             data.frame(distance=tacro.table$min.dist, drug=rep("Tacrolimus", nrow(tacro.table))), 
+             data.frame(distance=mmf.table$min.dist, drug=rep("MMF", nrow(mmf.table))) ), 
+      aes(x=(as.numeric(distance)), color=drug)) + geom_histogram(fill="white", position="dodge") + xlim(0,1000)
+
+
+ggplot(steroid.table, aes(x=as.numeric(min.dist))) + geom_histogram(fill="lightblue", color="blue") + xlim(-1,1000) + ylim(0,60) + xlab("Day Distance between Sample and Steroid Adjustment")
+
+```
+
+### Checking Doses
+
+```{r}
+
+triple.treatment$`dose-Tacrolimus-FU-Im-NeFIm` <- gsub(",", ".", triple.treatment$`dose-Tacrolimus-FU-Im-NeFIm`)
+triple.treatment<- triple.treatment %>% mutate_atall(vars(contains("dose") & ! contains("Unit") & ! contains("Date") & !contains("mg")), as.numeric ) 
+
+lapply(select(triple.treatment, contains("dose") & ! contains("Unit") & ! contains("Date") & !contains("mg")), summary)
+
+
+```
+
+asking Johannes if the ranges are normal? 
+my guess yes, e.g. low value of tacrolimusoralDose.sfIsd.Immun with 0.8 corresponds to a 4 year old patient
+
+which dose is of interest? 
+
+
+### Time Line Drug Admission 
+
+```{r}
+
+colnames(FU.ImmunosupDrugs) <-   gsub("\\-", "\\.", colnames(FU.ImmunosupDrugs))
+
+timeline <- select(ImContainer, ! contains("AGE"))
+
+colnames(timeline) <- sub("\\.BL.*", "", colnames(timeline))
+
+help.FU.ImmunosupDrugs <- select(FU.ImmunosupDrugs, -doseAdjustDate.FU.Im.NeFImAGEForVariable)
+
+colnames(help.FU.ImmunosupDrugs)<- sub("\\.FU.*", "", colnames(help.FU.ImmunosupDrugs))
+
+help.FU.ImmunosupDrugs <- select(help.FU.ImmunosupDrugs, -Dokument, -Status, -FU.doseAdjustDate,  -Erfassungsdatum, -`Datum (Container)` , -`Container Index` )
+
+
+spec.order <- c(colnames(help.FU.ImmunosupDrugs)[colnames(help.FU.ImmunosupDrugs)%in% colnames(timeline)], colnames(help.FU.ImmunosupDrugs)[! colnames(help.FU.ImmunosupDrugs)%in% colnames(timeline)] )
+
+#help.FU.ImmunosupDrugs <-help.FU.ImmunosupDrugs[, spec.order] %>% select_if(~ !all(is.na(.))) 
+
+help.FU.ImmunosupDrugs$dose.Tacrolimus <- as.numeric(sub(",", ".", help.FU.ImmunosupDrugs$dose.Tacrolimus))
+help.FU.ImmunosupDrugs$dose.Everolimus <- as.numeric(sub(",", ".", help.FU.ImmunosupDrugs$dose.Everolimus))
+
+timeline$fileorigin <- rep("BL", nrow(timeline))
+help.FU.ImmunosupDrugs$fileorigin <- rep("FU", nrow(help.FU.ImmunosupDrugs))
+
+timeline <- full_join(timeline, help.FU.ImmunosupDrugs, by=colnames(timeline)) %>% arrange(PatientID) %>% relocate(fileorigin, .after=Container)
+
+timeline <- timeline %>% relocate( lowTarget.OtherDrug, lowTargetUnit.OtherDrug, upTarget.OtherDrug, upTargetUnit.OtherDrug, actLevel.OtherDrug, actLevelUnit.OtherDrug, .after=doseUnit.OtherDrug) %>% relocate(actLevel.CyclosporineA, .after=upTarget.CyclosporineA )
+colnames(timeline)
+
+
+timeline<- timeline %>%  mutate(dose.Steroids = coalesce(dose.ldSteroids, dose.hdSteroids)) %>% relocate(dose.Steroids, .before=ldSteroids)
+
+timeline <- timeline %>%  select_if(~ !all(is.na(.))) 
+
+
+timeline <- timeline %>% relocate(PatientID, Container, fileorigin, .before=doseAdjustDate)
+
+
+```
+
+
+### adding sfIsd 
+
+```{r}
+## adding sfisd info 
+test.timeline <- timeline
+
+for (drugtable in data_list[-length(data_list)]) {
+  
+    ## extract drug name 
+    drugname <- sub(".*X", "", colnames(drugtable)[8])
+    ## removing dokument,  status,...
+    drugtable <- drugtable[, -c(2:8)]
+   
+    ## renaming 
+    drugtable <- drugtable %>% select( doseAdjustDate=ends_with("adjustDate.sfIsd.Immun"), ! ends_with("adjustDate.sfIsd.Immun") & ! contains("AGE")) %>% relocate(doseAdjustDate, .after=PatientID)
+    
+    ## removing suffix
+    colnames(drugtable) <- sub("\\.sfIsd.Immun*", "", colnames(drugtable))
+
+    
+    ## drugname starting with upper case 
+    colnames(drugtable)[3:ncol(drugtable)] <-stringr::str_replace(colnames(drugtable)[3:ncol(drugtable)], "^\\w{1}", toupper)
+     drugname <- tools::toTitleCase(drugname)
+    
+    ## swaping order from Drugnamexxx  to xx.Drugname
+     
+    pattern <- paste0("(", drugname, ")(.*)")
+    colnames(drugtable)[3:ncol(drugtable)] <- sub(pattern, "\\2.\\1", colnames(drugtable)[3:ncol(drugtable)])
+
+
+    ## one dose column and one dose unit column 
+    merged.dose <- paste("dose", drugname, sep=".")
+    oral_column <- paste0("oralDose.", drugname)
+    parenteral_column <- paste0("parenteralDose.", drugname)
+    
+    merged.unit <- paste("doseUnit", drugname, sep=".")
+    oralU_column <- paste0("oralDoseUnit.", drugname)
+    parenteralU_column <- paste0("parenteralDoseUnit.", drugname)
+    
+
+    drugtable<- drugtable %>%  mutate(!!merged.dose := coalesce(get(oral_column), get(parenteral_column)) ) %>%   
+      naniar::replace_with_na_all(condition = ~.x == "") %>% 
+      unite(!!merged.unit, c(oralU_column, parenteralU_column), sep = ",", na.rm = TRUE) %>% 
+      select(-c( oral_column, parenteral_column))
+  
+    ## adding fileorigin col 
+    
+    drugtable$fileorigin <- rep("sfIsd", nrow(drugtable))
+    
+   
+    ## renaming routeOfAdminstration to TypeOfAdminstration 
+    old.name <- paste("routeOfAdminstration", drugname, sep=".")
+    new.name <- paste("TypeOfAdminstration", drugname, sep=".")
+    drugtable <- drugtable %>% rename(!!new.name := !!old.name)
+    
+    test.timeline <- full_join(test.timeline, drugtable, by=intersect(colnames(timeline), colnames(drugtable)))
+    
+}
+
+colnames(test.timeline)
+
+test.timeline <- test.timeline %>% mutate(dose.MMF = coalesce(dose.MMF, dose.Mycophenolatmofetil)) %>% select(-dose.Mycophenolatmofetil)
+
+
+test.timeline<- test.timeline %>% arrange(PatientID, as.Date(doseAdjustDate, format="%d.%m.%Y")) 
+
+ ### merge rows with same adjust date together 
+   merged.entries <-  test.timeline %>% filter(fileorigin=="sfIsd") %>%
+                filter(!is.na(doseAdjustDate) & (doseAdjustDate!="")) %>%
+                group_by(PatientID, doseAdjustDate) %>% 
+               summarise_all(~paste(unique(.[!is.na(.)]), collapse = ";")) 
+   
+   Na.entries <-  test.timeline %>% filter(is.na(doseAdjustDate) | (doseAdjustDate=="") | fileorigin != "sfIsd") %>% mutate_if(is.numeric , as.character) %>% mutate_if(is.logical, as.character)
+   
+   ## put it together again 
+  reduced.timeline<- rbind(merged.entries, Na.entries) %>% arrange(PatientID, as.Date(doseAdjustDate, format="%d.%m.%Y"))
+  
+  reduced.timeline <- left_join( distinct(select(basic.info, PatientID, Event_Date, Transplantation_Date)), reduced.timeline, by="PatientID")
+  
+   reduced.timeline %>% select(PatientID, Event_Date, Transplantation_Date, doseAdjustDate, Container, fileorigin, contains("tacrolimus")) %>% filter(dose.Tacrolimus != "")
+
+   
+   reduced.timeline %>% filter(fileorigin == "BL" | !is.na(doseAdjustDate))
+   
+   
+   ## too many patients 
+   #timeline.plot.rej <- steroids.timeline %>% filter(!grepl(";", dose.Steroids) & TypeOfAdminstration.Steroids != "parenteral" & !is.na(Event_Date)) 
+   timeline.plot.rej <- steroids.timeline %>% filter(PatientID %in% c("0TVUK9N8" ,"PY2KYQ34" ,"0Q8R0EP5", "REXAV012", "JVYG1MZ4","1Z2E2PW2")  & !grepl(";", dose.Steroids) )
+   
+  timeline.plot.nonrej <- steroids.timeline %>% filter(PatientID %in% c(  "4UNMTRL7", "2PQA9TV5" ,"MV3VJME3",   "44ZW3P50" ,"8TP4T443", "33Q9QJ30")  & !grepl(";", dose.Steroids) )
+
+   
+   ggplot(timeline.plot.nonrej, aes(x=as.Date(doseAdjustDate, format="%d.%m.%Y"), y= as.numeric(dose.Steroids), group=PatientID)) + geom_point(aes(color=PatientID)) + geom_line(aes(color=PatientID)) + geom_vline(aes(xintercept=Transplantation_Date, color=PatientID))
+   
+   
+```
+
+
+```{r}
+reduced.timeline$doseAdjustDate <- as.Date(reduced.timeline$doseAdjustDate, format="%d.%m.%Y")
+
+reduced.timeline %>% filter(doseAdjustDate >= Transplantation_Date) %>% group_by(PatientID) %>% filter(any(dose.Steroids >0) & any(dose.MMF>0) & any(dose.Tacrolimus >0)) %>% pull(PatientID) %>% unique()
+
+reduced.timeline %>% filter(doseAdjustDate >= Transplantation_Date) %>% filter(dose.Steroids >0& dose.MMF>0 & dose.Tacrolimus >0) %>% pull(PatientID) %>% unique()
+
+reduced.timeline %>% filter(doseAdjustDate >= Transplantation_Date) %>% group_by(PatientID) %>% filter(any(dose.ATG>0)) %>% pull(PatientID) %>% unique()
+
+colnames(reduced.timeline)
+
+## only two entries, and also non sense ones
+reduced.timeline %>% select(ends_with(".Other")) %>% remove_empty("rows")  %>% filter(reasonForChange.Other!="" | TypeOfAdminstration.Other != "")
+
+
+## without levels
+reduced.timeline2 <- reduced.timeline %>% select(- contains("hdSteroids"), - contains("ldSteroids"), - contains("Target"), -contains("level"), -contains("apl"), -contains("lpl"), -ends_with(".Other"))
+
+reduced.timeline2 <- reduced.timeline2 %>% relocate(ends_with("Steroids"), .after= "fileorigin") %>% relocate(ends_with("Tacrolimus"), .after= "doseUnit.Steroids") %>% relocate(contains("MMF") | contains("Mycophenolatmofetil")  , .after="doseUnit.Tacrolimus")  %>% rename(TypeOfAdminstration_BLFU = TypeOfAdminstration)
+
+
+## with esp. tacro levels 
+
+reduced.timeline.levels <- reduced.timeline %>% select(-contains("hdSteroids"),  - contains("ldSteroids") ,  -ends_with(".Other"))  %>% relocate(ends_with("Steroids"), .after= "fileorigin") %>% relocate(ends_with("Tacrolimus"), .after= "doseUnit.Steroids") %>% relocate(contains("MMF") | contains("Mycophenolatmofetil")  , .after="apl.Tacrolimus")  %>% rename(TypeOfAdminstration_BLFU = TypeOfAdminstration)
+
+
+reduced.timeline.levels<- reduced.timeline.levels  %>% mutate_if(is.character, ~na_if(., ''))
+
+reduced.timeline.levels<- reduced.timeline.levels %>%  mutate(upTarget.Tacrolimus = case_when(is.na(upTarget.Tacrolimus) ~ ulpl.Tacrolimus, T ~upTarget.Tacrolimus),
+                                   lowTarget.Tacrolimus = case_when(is.na(lowTarget.Tacrolimus) ~ llpl.Tacrolimus, T ~ upTarget.Tacrolimus), 
+                                   actLevel.Tacrolimus = case_when(is.na(actLevel.Tacrolimus) ~ apl.Tacrolimus, T ~ actLevel.Tacrolimus), 
+                                    ) %>% select(-llpl.Tacrolimus, -ulpl.Tacrolimus, -apl.Tacrolimus)
+
+
+
+
+
+```
+
+
+
+```{r}
+reduced.timeline2 <- reduced.timeline2  %>% mutate_if(is.character, ~na_if(., ''))
+
+
+process_immunotable <- function(timeline){
+  
+suffixes <- unique(gsub(".*\\.", "", names(timeline)))
+
+# Create a list to store grouped column names
+grouped_columns <- list()
+
+# Iterate through unique suffixes and group columns
+for (suffix in suffixes) {
+  columns_with_suffix <- grep(paste0( suffix, "$"), names(timeline), value = TRUE)
+  grouped_columns[[suffix]] <- columns_with_suffix
+}
+
+# Flatten the list to get the ordered column names
+ordered_columns <- unlist(grouped_columns)
+
+timeline <- timeline %>%   select(c("PatientID", "Event_Date", "Transplantation_Date", as.vector(ordered_columns)))
+
+## merging cyclosporine and cyclosporineA
+
+timeline<- timeline %>% unite("dose.Cyclosporine", c(dose.Cyclosporine, dose.CyclosporineA), sep = ",", na.rm = TRUE) 
+
+timeline<- timeline %>% rename(Cyclosporine=CyclosporineA) %>% relocate( ends_with(".Cyclosporine"), .after=Cyclosporine)
+
+
+## adding last file: other drug 
+
+otherdrug_sfisd <- data_list[[13]] %>% select(PatientID, Container, OtherDrugSpecification = otherspecifiedName.sfIsd.Immun) %>%
+                                      mutate(across(where(is.character), ~na_if(., "")))
+otherdrug_sfisd <-  otherdrug_sfisd %>% filter(rowSums(!is.na(otherdrug_sfisd)) > 1) %>% left_join(basic.info %>% select(PatientID, Transplantation_Date, Event_Date) %>% distinct(), by="PatientID") %>% mutate(fileorigin="sfIsd")
+
+
+timeline <- timeline %>% full_join(otherdrug_sfisd, by=colnames(otherdrug_sfisd)) %>% arrange(PatientID, doseAdjustDate)
+
+
+return(timeline)
+}
+
+
+reduced.timeline.levels <- process_immunotable(reduced.timeline.levels)
+
+names(reduced.timeline.levels)
+
+
+#write.table(reduced.timeline2, file="ImmunosupDrugTimeline.tsv", quote=F, row.names = F, col.names = T, sep="\t", na = ""  )
+
+
+reduced.timeline2<- reduced.timeline2 %>% mutate(dose_Tx_day_diffs = doseAdjustDate - Transplantation_Date) %>% relocate(dose_Tx_day_diffs, .after = doseAdjustDate)
+
+
+reduced.timeline2  <- reduced.timeline2 %>% mutate(dose_Event_day_diffs = doseAdjustDate - Event_Date) %>% relocate(dose_Event_day_diffs, .after = doseAdjustDate)
+
+long.timeline <- reduced.timeline2 %>% select( PatientID, dose_Event_day_diffs, dose_Tx_day_diffs, starts_with("dose."), starts_with("TypeOfAdminstration.")) %>% 
+  gather("drug", "dose", starts_with("dose.")) %>% 
+  #gather("drugx", "typeofadminstration", starts_with("TypeOfAdminstration."))  %>% 
+  transform(drug= stringr::str_replace(drug, "dose.", "")) 
+  #transform(drugx= stringr::str_replace(drugx, "TypeOfAdminstration.", "")) 
+
+
+ggplot( long.timeline %>% filter( !is.na(dose) & !(drug %in% c("Steroids", "MMF", "Tacrolimus", "OtherDrug")) & dose_Tx_day_diffs >=0 )
+, aes(x=dose_Tx_day_diffs, y=as.numeric(dose), color=drug))+ geom_point()
+
+
+ggplot( long.timeline %>% filter( !is.na(dose) & dose !="" & drug == "Cyclosporine" & TypeOfAdminstration.Cyclosporine == "oral" & dose_Tx_day_diffs >=0 ) %>% mutate(rej=is.na(dose_Event_day_diffs))
+, aes(x=dose_Tx_day_diffs, y=as.numeric(dose), color= PatientID, shape=rej))+ geom_point()  + theme(legend.position = "none")
+
+
+long.timeline %>% filter( !is.na(dose) & dose!="" & drug == "Rituximab" & dose_Tx_day_diffs >=0  ) %>% summarise(n_distinct(PatientID))
+
+
+colnames(long.timeline)
+
+
+```
+
+
+
+### Steroids 
+
+```{r}
+ steroids.timeline <- reduced.timeline %>% select(PatientID, Event_Date, Transplantation_Date, doseAdjustDate, Container, fileorigin, contains("steroids")) %>%
+      mutate(dose.Steroids = ifelse(reasonForChange.Steroids == "End of Administration", "0", dose.Steroids)) %>%
+    filter(dose.Steroids != "")  %>% filter(fileorigin == "BL" | !is.na(doseAdjustDate))
+  
+```
+
+
+```{r}
+reduced.timeline2
+reduced.timeline.levels
+
+### 1.3.1 container dates then FU dates 
+ContainerDates<- mergeContainer %>% select(Container, Container_Date=Datum..Container..y.y) %>%
+                                    rbind(select(FU.ImmunosupDrugs, Container, Container_Date=`Datum (Container)`)) %>% 
+                                    mutate(Container=as.character(Container)) %>% distinct()
+
+## add the container dates
+add_containerdates_immuno <- function(timeline){
+  
+  immuno.timeline <- left_join(timeline , ContainerDates, by="Container")%>%
+                      mutate(Container_Date=as.Date(Container_Date, format="%d.%m.%Y")) %>%
+                      relocate(Container_Date ,.after="PatientID") 
+
+
+
+## make table a bit more pretty  and also adding rej
+immuno.timeline <- immuno.timeline%>%  rename(DoseAdjust_Date=doseAdjustDate) %>%
+                                           relocate(Transplantation_Date, .before=Event_Date) %>% relocate(fileorigin, .after = last_col()) %>% 
+                                           relocate(Container, Container_Date) %>% relocate(TypeOfAdminstration_BLFU, .before=dose.Steroids) %>% 
+                                           mutate(rej=case_when(is.na(Event_Date) ~ 0, T ~ 1), .after=Event_Date) 
+
+
+return(immuno.timeline)
+  
+}
+
+immuno.timeline <- add_containerdates_immuno(reduced.timeline2)
+immuno.timeline.tacrolevels <- add_containerdates_immuno(reduced.timeline.levels)
+```
+
+# Tacrolimus Statistics 
+```{r}
+## some tacro measurements with irrational high values , if value >= 40 then value/10
+# in Range true, if actual level is between low and up , or if only a target level is provided then +/- 1 o
+
+immuno.timeline.tacrolevels<- immuno.timeline.tacrolevels %>% mutate_at(c("lowTarget.Tacrolimus", 	"upTarget.Tacrolimus", "actLevel.Tacrolimus"), as.numeric ) %>%
+  mutate_at(c("lowTarget.Tacrolimus", 	"upTarget.Tacrolimus", "actLevel.Tacrolimus"), function(x){case_when(x >=40 ~ x/10, T ~x)} ) %>%   mutate(avgTarget.Tacrolimus = (lowTarget.Tacrolimus+upTarget.Tacrolimus)/2 ,.after=upTarget.Tacrolimus ) %>% 
+  mutate(inRange.Tacrolimus= case_when( lowTarget.Tacrolimus != upTarget.Tacrolimus & (actLevel.Tacrolimus >=lowTarget.Tacrolimus & actLevel.Tacrolimus <= upTarget.Tacrolimus) ~"in", lowTarget.Tacrolimus != upTarget.Tacrolimus & (actLevel.Tacrolimus >upTarget.Tacrolimus) ~"up",
+           lowTarget.Tacrolimus != upTarget.Tacrolimus & (actLevel.Tacrolimus < lowTarget.Tacrolimus) ~"down",
+                                    lowTarget.Tacrolimus == upTarget.Tacrolimus & (actLevel.Tacrolimus -lowTarget.Tacrolimus >1 ) ~ "up",
+                                               lowTarget.Tacrolimus == upTarget.Tacrolimus & (actLevel.Tacrolimus -lowTarget.Tacrolimus < -1 ) ~ "down",
+                                   lowTarget.Tacrolimus == upTarget.Tacrolimus & (abs(actLevel.Tacrolimus -lowTarget.Tacrolimus) <=1 ) ~ "in", T ~NA)
+         
+         
+         , .after=actLevel.Tacrolimus)
+
+
+names(immuno.timeline.tacrolevels) 
+
+
+
+
+
+
+```
+tacro information before sample for: 
+51 from 60 patients of group non rejection
+23 from 32 patients with rejection 
+
+```{r}
+c2.tacro.stats<- immuno.timeline.tacrolevels %>% select(PatientID, rej, DoseAdjust_Date,Transplantation_Date,Event_Date,DoseAdjust_Date, contains("Tacro")) %>% filter(PatientID %in% cohort2_patients) %>% right_join(basic.info %>%  filter(SampleID %in% cohort2_Ids) %>% select(PatientID, SampleID, Sample_Date=Date),., by="PatientID") %>%  filter(DoseAdjust_Date <= Sample_Date & DoseAdjust_Date >= Transplantation_Date & !is.na(inRange.Tacrolimus))   %>% filter(!SampleID %in% out_samples)
+```
+
+different plots 
+```{r}
+c2.tacro.stats %>% group_by(PatientID, SampleID,rej) %>% count() %>% mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection"))) %>% ggplot(aes(x=rej, y=n,fill=rej)) + geom_boxplot() + theme_classic()  + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5) + ylab("Number of Tacrolimus Records") + xlab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=13),
+    strip.background = element_blank()
+    ) 
+
+c2.tacro.stats %>% count(SampleID,  PatientID, rej,inRange.Tacrolimus)%>% spread(inRange.Tacrolimus,n,fill=0) %>% mutate(total_n=(down + `in` +up)) %>% mutate(perc_down=down/total_n, perc_in=`in`/total_n , perc_up=up/total_n  ) %>% mutate(most_freq=  case_when( perc_down >= perc_in & perc_down > perc_up ~ "down", perc_up >= perc_in & perc_up > perc_down ~ "up", T ~ "in" )) %>% group_by(rej) %>% count(most_freq) %>% mutate(perc=case_when(rej==0 ~ n/51, T~n/23) ) %>% mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection"))) %>%
+  ggplot( aes(x=rej, y=perc, fill=most_freq))  +  geom_bar(position="fill",stat="identity") + xlab("") + ylab("") +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+panel.background = element_blank(),
+
+ axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=13),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+
+    panel.border = element_blank(),
+
+
+) +   
+   geom_text(aes( label = n),position= position_stack(vjust = 0.5),size = 4.2,color="black")  +scale_fill_nejm()
+
+c2.tacro.stats %>% count(SampleID,  PatientID, rej,inRange.Tacrolimus)%>% spread(inRange.Tacrolimus,n,fill=0) %>% mutate(total_n=(down + `in` +up)) %>% mutate(perc_down=down/total_n, perc_in=`in`/total_n , perc_up=up/total_n  ) %>% mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection"))) %>%
+  ggplot( aes(x=rej, y=perc_in, fill=rej))  +  geom_boxplot() + xlab("") + ylab("") + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5, vjust=-0.5) + ylab("Percentage of Tacrolimus level within range") + xlab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+panel.background = element_blank(),
+
+ axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=13),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+
+
+) 
+  
+
+
+
+c2.tacro.stats %>% group_by(SampleID,rej) %>% summarise(avg_actLevel= mean(actLevel.Tacrolimus)) %>%mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection")))  %>% ggplot(aes(x=rej, fill=rej, y=avg_actLevel)) + geom_boxplot() + theme_classic()  + stat_compare_means(size=5,label.x.npc = "center", hjust=0.5) + ylab("Average Tacrolimus Level") + xlab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=13),
+    strip.background = element_blank()
+    ) 
+ # %>% gather("ranges","perc", perc_down, perc_in,perc_up) %>% ggplot(aes(x=factor(rej), y=perc)) + geom_boxplot() +  facet_wrap(~ranges, labeller = labeller(ranges = 
+   # c("perc_down" = "down", "perc_in"= "in","perc_up"= "up")))
+
+
+c2.tacro.stats %>% mutate(Target.Level.Diff = avgTarget.Tacrolimus -actLevel.Tacrolimus, .after= actLevel.Tacrolimus) %>%mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection"))) %>% group_by(SampleID, rej) %>% summarise(Target.Level.Diff= mean(Target.Level.Diff)) %>% ggplot(aes(x=rej, fill=rej, y=Target.Level.Diff)) + geom_boxplot() + theme_classic()  + stat_compare_means(size=5,label.x.npc = "center", hjust=0.5) + ylab("Mean Difference of Target to Actual Level") + xlab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=13),
+    strip.background = element_blank()
+    ) 
+
+
+ c2.tacro.stats %>% mutate(Target.Level.Diff = avgTarget.Tacrolimus -actLevel.Tacrolimus, .after= actLevel.Tacrolimus) %>%mutate(rej=factor(case_when(rej==0 ~ "Normal Progress",T~"Rejection"))) %>% filter(Target.Level.Diff >=-15 & Target.Level.Diff <=15) %>% ggplot(aes( fill=rej, x=Target.Level.Diff,color=rej)) + geom_density(alpha=0.4) + theme_classic()  + xlab("Difference of Target to Actual Level") + ylab("") + scale_fill_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + scale_color_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+   geom_vline(xintercept=0, linetype="longdash", color="black")+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=9),
+    
+    axis.text.x = element_text(color="black", size=9),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=9),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=10),
+    strip.background = element_blank()
+    )
+ ggsave("../plots/cohort2/description/tac_diff_histogram_15range.pdf",width=6.5, height=4 )
+
+ #%>% summarise(Target.Level.Diff= mean(Target.Level.Diff))
+c2.tacro.stats %>% mutate(Target.Level.Diff = avgTarget.Tacrolimus -actLevel.Tacrolimus, .after= actLevel.Tacrolimus) %>%mutate(rej=factor(case_when(rej==0 ~ "Non Rejection",T~"Rejection"))) %>%group_by(SampleID, rej) %>% ggplot(aes( fill=rej, x=actLevel.Tacrolimus,color=rej)) + geom_density(alpha=0.4) + theme_classic()  + xlab("Tacrolimus Actual Level") + ylab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + scale_color_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+    legend.position = "top",
+) 
+
+c2.tacro.stats %>% mutate(Target.Level.Diff = avgTarget.Tacrolimus -actLevel.Tacrolimus, .after= actLevel.Tacrolimus) %>%mutate(rej=factor(case_when(rej==0 ~ "Non Rejection",T~"Rejection"))) %>%group_by(SampleID, rej) %>% summarise(Target.Level.Diff= mean(Target.Level.Diff))  ggplot(aes( fill=rej, x=Target.Level.Diff,color=rej)) + geom_density(alpha=0.4) + theme_classic()  + xlab("Tacrolimus Actual Level") + ylab("") + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + scale_color_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=12),
+    legend.position = "top",
+) 
+ ggsave("../plots/cohort2/description/tac_actLevel_histogram.pdf",width=6.5, height=4 )
+
+ 
+ c2.tacro.stats %>% group_by(rej) %>% summarise(n=n_distinct(PatientID)) 
+```
+
+
+
+
+
+# Intitial Immunosuppression 
+
+```{r}
+#initial_immunosuppression_table <- read_excel("Rosa/tables/20240313_immunosuppression.xlsx")
+
+## how many got the standard triple treatment 
+distribution_initialimmunosup<- initial_immunosuppression_table %>% select(PatientID, rej, starts_with("initial")) %>% group_by(rej) %>% summarise_at(vars(starts_with("init")), ~ sum(. == "yes")) %>% gather( "drug", "counts",-rej) %>% mutate(drug= str_replace(drug,"initial_", ""), perc=case_when(rej==0 ~ counts/60, T ~ counts/32), rej=case_when(rej==0 ~ "Normal Progess", T ~ "Rejection"))%>% ggplot(aes(x=reorder(drug, -counts), y=perc, fill=rej)) + geom_bar(stat="identity", position="dodge") + geom_text(aes(label=counts),position = position_dodge(0.9),vjust = 1.5,size=2.8) +  scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + xlab("") + ylab("")
+
+ggsave("../plots/cohort2/description/distribution_initial_immunosup.pdf", distribution_initialimmunosup, width=8.7, height=4.3)
+
+
+initial_immunosuppression_table %>% select(PatientID, rej, starts_with("initial")) %>% group_by(rej) %>% summarise_at(vars(starts_with("init")), ~ sum(. == "yes")) %>% gather( "drug", "counts",-rej) %>% mutate(drug= str_replace(drug,"initial_", ""), perc=case_when(rej==0 ~ counts/60, T ~ counts/32), rej=case_when(rej==0 ~ "Normal Progess", T ~ "Rejection"))
+```
+
+
+
+# Immunosuppression at Sample
+```{r}
+library(readr)
+X20240313_immunosuppression_at_sample <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Rosa/tables/ClinicalData/Cohort2/20240313_immunosuppression_at_sample.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+X20240313_immunosuppression_at_sample %>% filter(MMF_at_sample =="no")
+
+X20240313_immunosuppression_at_sample  %>% select(PatientID, rej, ends_with("_at_sample")) %>% group_by(rej) %>% summarise_at(vars(ends_with("_at_sample")), ~ sum(. == "yes")) %>% gather( "drug", "counts",-rej) %>% mutate(drug= str_replace(drug,"_at_sample", ""), perc=case_when(rej==0 ~ counts/60, T ~ counts/32), rej=case_when(rej==0 ~ "Normal Progess", T ~ "Rejection"))%>% ggplot(aes(x=reorder(drug, -counts), y=perc, fill=rej)) + geom_bar(stat="identity", position="dodge") + geom_text(aes(label=counts),position = position_dodge(0.9),vjust = 1.5,size=2.8) +  scale_fill_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + xlab("") + ylab("")
+
+
+ggsave("../plots/cohort2/description/distribution_atsample_immunosup.pdf", width=7, height=4.3)
+
+```
+
+
+
+
+
+

@@ -1,0 +1,560 @@
+---
+title: "PICRUSt 2 Downstream Analysis"
+output: html_notebook
+---
+
+#PICRUSt 2 Downstream Analysis 
+
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+
+## Reading PiCrust file
+```{r}
+library(ggpicrust2)
+library(ggplot2)
+library(dplyr)
+abundance <- read.table( "../tables/pred_metagenome_unstrat.tsv", sep="\t", header=T)
+
+picrust_metadata <- basic.info %>% filter(SampleID %in% cohort2_Ids) %>% select(SampleID,PatientID,rej,age,sex=Geschlecht)
+
+#"../tables/pred_metagenome_unstrat.tsv"
+ko2kegg<- ko2kegg_abundance( data=abundance)
+
+## kegg ko annotation
+kegg_abundance_cohort2 <- ko2kegg_abundance(data= abundance %>% select(function. , cohort2_Ids))
+
+```
+## KO Preselection
+
+normalized with standardization 
+
+```{r}
+# Define a function to fit the linear model and extract results
+KO_fit_model <- function( KO_merged_data,start, FDR_method="BH") {
+  
+result_df <- data.frame(matrix(nrow=ncol(KO_merged_data)-start+1, ncol=3))
+colnames(result_df) <- c("KO", "foldchange", "p_value")
+  
+
+# Loop through each KO
+for (ko_idx in start:ncol(KO_merged_data)) {
+  # Fit linear model with sex and age as covariates for the current KO
+  ko <- colnames(KO_merged_data)[ko_idx]
+  f<- formula(paste(ko, "~ rej+ age+sex", sep=" "))
+  model <- lm(f, data = KO_merged_data)
+  
+  # Extract coefficients from the model
+  coefficients <- coef(model)
+  
+  # Calculate fold change
+  fold_change <- filter(KO_merged_data, rej==1)  %>% pull(ko)%>% mean()/filter(KO_merged_data, rej==0) %>% pull(ko) %>% mean()
+  
+  # Extract p-values from the model summary
+  p_value <- coef(summary(model))[, "Pr(>|t|)"][2]
+  
+  
+  print(c(ko, fold_change, as.numeric(p_value)))
+
+  result_df[(ko_idx-start+1),] <- c(ko, fold_change, as.numeric(p_value))
+  
+}
+# Calculate adjusted p-values using Benjamini-Hochberg procedure
+corrected_p_values <- p.adjust(result_df$p_value, method = FDR_method)
+
+result_df <- cbind(result_df, corrected_p_values)
+
+return(result_df)
+
+}
+
+preselect_KOs <- function(abundance, samples, suffix="92"){
+
+  normalized_KOs <- as.data.frame(scale(abundance %>% select(samples,function.) %>%  column_to_rownames("function.")))
+
+
+    # Merge filtered KO abundance data with metadata based on sample IDs
+    
+    KO_merged_data <- left_join(picrust_metadata %>% filter(SampleID %in% samples), as.data.frame(t(normalized_KOs)) %>% rownames_to_column("SampleID") , by = "SampleID")%>% column_to_rownames("SampleID")
+
+
+  KO_results_df <- KO_fit_model(KO_merged_data,5)
+  
+  num_signif <- nrow(KO_results_df %>% filter(corrected_p_values <= 0.05))
+  signif_KOs <- ( KO_results_df %>% filter(corrected_p_values <= 0.05) %>% pull(KO))
+
+
+transposed_metadata <- as.data.frame(t(picrust_metadata))
+colnames(transposed_metadata) <- transposed_metadata[1,]
+transposed_metadata <- transposed_metadata[-1,]
+
+write.table(KO_results_df %>% pull(KO), paste0("../tables/signifKO_", suffix, ".tsv"),  quote = F, col.names = F, row.names = F, sep="\t", na="")
+
+write.table(abundance %>% select(KEGG_ortholog=function.,samples) %>% filter(KEGG_ortholog %in% signif_KOs) %>% mutate(id=c(1:num_signif),.before=KEGG_ortholog), paste0("../tables/GOmixer_reduced_featureinput_", suffix, ".tsv"),  quote = F, col.names = T, row.names = F, sep="\t", na="")
+
+write.table(transposed_metadata[,samples] %>% rownames_to_column("metadata"), paste0("../tables/GOmixer_metainput_", suffix,".tsv"),  quote = F, col.names = T, row.names = F, sep="\t", na="")
+
+return(KO_results_df)
+  
+}
+```
+
+
+```{r}
+KO_results92 <- preselect_KOs(abundance, in_samples, suffix="92")
+
+KO_results92 %>% filter(corrected_p_values <0.05)
+
+write.table(read.table("../tables/GOmixer_featureinput_n92.tsv", sep="\t", header=T) %>% select(id, KEGG_ortholog, in_samples), "../tables/GOmixer_featureinput_n92.tsv",  quote = F, col.names = T, row.names = F, sep="\t", na="")
+```
+
+
+## Visualization GO mixer result 
+
+### Comparative Analysis Result
+
+```{r}
+GOmixer_result <- read.table( "../tables/GOmixer_CAresult_n92.tsv", sep="\t", header=T)
+MF_annotations <- GOmixer_result %>%  separate_wider_delim(Feature, delim = ": ", names = c("Feature", "Annotation")) %>% select(Feature, Annotation,FDR)
+
+signif_modules <- MF_annotations %>% filter(FDR <0.05) %>% pull(Feature)
+
+signif_GOmixer_result <- GOmixer_result %>% filter(FDR <0.05)
+
+scale_factor <- max(signif_GOmixer_result$Difference)/max(signif_GOmixer_result$FDR)
+
+GOmixer_modules_plot <- ggplot(signif_GOmixer_result, aes(x=reorder(Feature,Difference))) +
+  
+  geom_col( aes(y=Difference,fill=as.factor(Change)), stat='identity',position = position_nudge(x = .35), width=0.5) +
+   # geom_col( aes(y=FDR*scale_factor), stat='identity', width=0.2, fill="black") +
+
+    #scale_y_continuous("Difference", sec.axis = sec_axis(~ ./(scale_factor), name = "FDR")) +
+    coord_flip() +
+    theme_classic() + xlab("") +
+  
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + scale_fill_aaas()
+
+ggsave("../plots/cohort2/GOmixer/allC2/significant_modules.pdf", GOmixer_modules_plot, width=9,height=15)
+
+
+```
+### Inferred GOmixer modules 
+
+```{r}
+GOmixer_inferredMFs_transposed <-   read.table( "../tables/GOmixer_inferredMF_n92s.tsv", sep="\t", header=T) %>% mutate(Feature= str_replace(Entries,"NA_",""), .keep="unused") %>% relocate(Feature)
+
+GOmixer_inferredMFs <- read.table( "../tables/GOmixer_inferredMF_n92s.tsv", sep="\t", header=T) %>% mutate(Feature= str_replace(Entries,"NA_",""), .keep="unused") %>% relocate(Feature)
+GOmixer_inferredMFs <- as.data.frame(t(GOmixer_inferredMFs))
+colnames(GOmixer_inferredMFs) <- GOmixer_inferredMFs[1,]
+GOmixer_inferredMFs <- GOmixer_inferredMFs[-1,] %>% rownames_to_column("SampleID")
+
+GOmixer_inferredMFs <- GOmixer_inferredMFs %>%  mutate(across(starts_with("MF"), as.numeric)) %>%  right_join(picrust_metadata,., by="SampleID") %>% group_by(rej)
+```
+
+
+### Abundance Bar Plot
+```{r}
+mean_abundance <- GOmixer_inferredMFs  %>%  group_by(rej) %>%  summarize(across(starts_with("MF"), mean)) 
+
+# Calculate the mean proportion between two groups
+proportions <- GOmixer_inferredMFs %>% group_by(SampleID)%>%
+  mutate(Sum=sum(across(starts_with("MF"))),.after=sex) %>% 
+  mutate(across(starts_with("MF"), ~ ./Sum)) %>%  group_by(rej) %>% summarize(across(starts_with("MF"), mean)) 
+
+plot_proportions <- as.data.frame(t(mean_abundance)) 
+colnames(plot_proportions) <- plot_proportions[1,]
+plot_proportions <- plot_proportions[-1,] %>% rownames_to_column("Module")  %>% gather("group", "MeanProportion", "0","1") %>% left_join(MF_annotations %>% rename(Module=Feature), by="Module")
+
+
+## mean difference and CI 
+diffCIs<- as.data.frame(t(apply(GOmixer_inferredMFs_transposed %>% column_to_rownames("Feature"),1, function(x)DescTools::MeanDiffCI(x[rej_samples], x[nonrej_samples]))))
+
+
+abundance_bar<- ggplot(plot_proportions %>% filter(FDR < 0.05 & Module != "MF0048") %>% mutate(group=case_when(group==0 ~ "Normal Progress", T ~ "Rejection")) , aes(x= Annotation, y = (as.numeric(MeanProportion)), fill=group)) + coord_flip()+
+  geom_bar(position="dodge", stat="identity", width=0.8) +
+  labs(x = "", y = "Mean Abundance") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 12),
+        plot.title = element_text(size = 14, face = "bold"))+
+   theme_classic() + scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) +
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + ggstats::geom_stripped_cols()
+
+  
+diffCIs_plot <- ggplot(diffCIs %>% rownames_to_column("Module") %>% left_join(MF_annotations %>% rename(Module=Feature), by="Module")  %>% filter(Module %in% signif_modules & Module != "MF0048") %>% mutate(color=meandiff >0 ), aes(y=Annotation, x=meandiff)) + 
+  geom_point( aes(color=color), size=2) + geom_errorbar(aes(xmax=upr.ci, xmin=lwr.ci))  + theme_classic() + scale_color_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + xlab("Difference in Mean Abundance")+
+   theme(
+     
+    axis.line = element_line(colour = "darkgrey"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.ticks.x  = element_line(color = "black"),
+    axis.text.x = element_text(color="black", size=11),
+    
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y  =element_blank(),
+
+    legend.position = "none",
+    legend.text =  element_blank(),
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) +  ggstats::geom_stripped_rows()
+
+abundance_bar + diffCIs_plot 
+
+
+ggsave("../plots/cohort2/GOmixer/diffGOmixer_modules_abundance_plot.pdf",abundance_bar + diffCIs_plot , width=13, height = 10)
+```
+
+### getting hierarchy for annotation
+hierarchy is from the table on the GO mixer website 
+```{r}
+
+hierarchy_info <- read.csv2("../tables/modules_hierarchy.tsv", sep="\t") %>% mutate(Feature=str_replace(modules, " ", ""), .keep="unused", .before=name) 
+
+MF_annotations<- MF_annotations %>% right_join(hierarchy_info ,., by="Feature") %>% mutate(plot_hierarchy= case_when(hierarchy2 == "butyrate metabolism" ~ "butyrate metabolism", hierarchy2 =="acetate metabolism" ~ "acetate metabolism", T ~ hierarchy1))
+
+
+MF_annotations
+```
+
+### Log2 FC calculation
+```{r}
+grpmeans <- GOmixer_inferredMFs %>% select(-c(SampleID, PatientID, age,sex)) %>% group_by(rej) %>% summarise(across(everything(), mean)) %>% t() %>% as.data.frame()  %>% rownames_to_column("Module") %>% rename("Non Rejection"=V1, "Rejection"=V2) %>% filter(Module!="rej")
+
+grpmeans$FC <- log2( (as.numeric(grpmeans$Rejection) +0.0001)/(as.numeric(grpmeans$`Non Rejection`)+0.0001) )
+
+grpmeans<- grpmeans %>% arrange(FC)
+
+fc_levels <- grpmeans %>% mutate(Module=fct_reorder(Module, FC)) %>% pull(Module)
+
+grpmeans <- grpmeans %>% mutate(Module=fct_reorder(Module, FC), direction=case_when(FC<0 ~ "decreased", T ~ "increased"))
+
+```
+
+
+
+```{r}
+signficantMFs <- MF_annotations %>% filter(FDR < 0.05) %>% pull(Feature)
+
+```
+
+### Abundance Heatmap 
+```{r}
+#mf_cluster <- MF_annotations %>% mutate(hierarchy1= case_when(hierarchy2 == "butyrate metabolism" ~ "butyrate metabolism", hierarchy2 =="acetate metabolism" ~ "acetate metabolism", T ~ hierarchy1)) %>% select(Module=Feature, hierarchy1) 
+
+
+heatmap_input <- GOmixer_inferredMFs %>% select(SampleID, rej, signficantMFs )  %>% ungroup() %>% mutate(across(starts_with("M"), scale))%>% gather("Module", "Abundance", -c(SampleID, rej) ) %>%  mutate(Module= factor(Module, levels = fc_levels)) %>% arrange(Module)  %>% left_join(MF_annotations,by="Module" ) %>% mutate(plot_hierarchy= paste(direction,plot_hierarchy, sep=":"))
+
+# order them by hierarchy 
+module_order_plot <- heatmap_input  %>% arrange(plot_hierarchy) %>% select(Module, plot_hierarchy) %>% distinct()%>% pull(Module)  
+
+
+```
+```{r}
+custom_labeller <- function(value) {
+  # Extract prefix before " :"
+  new_label <- gsub("^.+?\\s*:\\s*(.*)", "\\1", value)
+  #new_label=""
+  return(new_label)
+}
+```
+
+99%-100% percentile jump from 2... to 8 -> messing up the color scheme , thus excluding this range and color them separately as "NAs"
+
+```{r}
+quantile_99th<-  quantile_breaks(heatmap_input$Abundance  , n = 100)[99]
+ 
+# Create the ggplot with the custom color scale
+heatmap <- ggplot(heatmap_input, aes(y = Module, x = SampleID, fill = Abundance)) +
+  geom_tile(color = "grey", lwd = 0.2, linetype = 1,) +
+    scale_fill_continuous_divergingx(palette = 'PiYG', rev=T,  mid = 0, na.value="#8E0152", limits=c(min(heatmap_input$Abundance), quantile_99th)) + 
+  
+
+ # scale_fill_distiller(palette="PiYG", na.value="#8E0152", limits=c(min(heatmap_input$Abundance), quantile_99th) )+
+#  scale_fill_gradientn(colors = c("green", "white", "pink"), breaks=c(mat_breaks[1], 0,mat_breaks[10]) ,limits=c(mat_breaks[1], mat_breaks[10]), guide = "colorbar", na.value = "black") +
+  facet_grid2(cols = vars(rej), rows = vars(plot_hierarchy), scales = "free", space = "free", switch = "y",
+              labeller = labeller(rej = c("0" = "Non Rejection", "1" = "Rejection"),
+                                  plot_hierarchy = custom_labeller),
+              strip = strip_themed(background_x = elem_list_rect(fill = c("#0072B599", "#BC3C2999")))) +
+  theme_classic()+
+  theme(strip.placement = "outside",
+        panel.spacing = unit(0, 'lines'),
+        strip.background = element_rect(fill = "white", color = "grey"),
+        strip.text.y.left = element_text(angle = 0, color = "black", size = 12, hjust = 1),
+        strip.text.x = element_text(color = "black", size = 12),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(color = "black", size = 12),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "left")
+```
+
+alterantively, fitting color scheme in 10 steps, each covering 10% of the data
+
+```{r}
+mat_breaks <- quantile_breaks(heatmap_input$Abundance  , n = 11)
+names(mat_breaks) <- round(mat_breaks,2)
+colors <- rev(brewer.pal(length(mat_breaks) - 1, "PiYG") ) # PiYG palette from RColorBrewer
+
+heatmap2<- ggplot(heatmap_input %>% arrange(FC), aes(y=Module, x=SampleID, fill=Abundance)) + geom_tile(color = "grey",lwd = 0.2, linetype = 1)  +   
+  #scale_fill_binned( type="PiYG", breaks=mat_breaks[2:10], limits=c(mat_breaks[1], mat_breaks[11]),  guide = guide_coloursteps(even.steps = T,reverse=F, show.limits = T))+
+  binned_scale(aesthetics = "fill", scale_name = "stepsn", 
+               palette=function(x) rev(brewer.pal(length(mat_breaks) - 1, "PiYG") ), 
+               breaks= mat_breaks[2:10],
+               limits=c(mat_breaks[1], mat_breaks[11]),
+      
+               show.limits = T,
+               guide="colorsteps")+
+
+  facet_grid2(cols=vars(rej), rows=vars(plot_hierarchy), scales = "free", space = "free", switch="y",
+             labeller = labeller(rej = c("0" = "Non Rejection", "1" = "Rejection"),
+                                 plot_hierarchy = custom_labeller), strip=strip_themed(background_x = elem_list_rect(fill = c( "#0072B599","#BC3C2999") )))+
+               theme( strip.placement = "outside", 
+                      panel.spacing = unit(0,'lines'),
+         strip.background =element_rect(fill="white", color="grey"), 
+         strip.text.y.left  = element_text(angle=0, color="black", size=12, hjust=1),
+                  strip.text.x  = element_text(color="black", size=12),
+
+         axis.title.x=element_blank(),
+ axis.text.y = element_text(color="black", size=12),
+  axis.text.x = element_blank(),
+
+ axis.ticks.x=element_blank(),
+        legend.position = "left"
+ #legend.key.height = unit(1.7, "cm")
+        # panel.border = element_rect(colour = "black", fill = NA)
+
+) + ylab("") 
+
+
+```
+
+### Lolliplot
+```{r}
+lolliplot<- ggplot(heatmap_input %>% mutate(Module= factor(Module, levels=rev(module_order_plot))) %>% filter(!is.na(Module)), aes(x=(Module), y=FC)) + geom_point()+   geom_segment( aes(x=Module, xend=Module, y=0, yend=FC), color="grey") + coord_flip() + geom_point( aes(color=direction), size=2.5) +
+  theme_classic() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.border = element_blank(),
+    axis.ticks.x = element_blank(),
+      axis.title.y=element_blank(),
+      axis.text.y=element_blank(),
+      axis.ticks.y=element_blank(),
+    
+axis.line = element_blank(),
+    axis.text.x = element_text(color="black", size=11),
+
+    axis.title.x  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    
+    
+      axis.title.y.right = element_text(),   # For x axis label on top axis
+    legend.position = "none"
+  ) +  ggstats::geom_stripped_cols() + 
+  xlab("") + scale_color_manual(values=c( "darkblue","red")) + ylab("Log2 Fold Changes") #+ scale_y_continuous(position = "right") 
+```
+
+### Merge Heatmap + Lolliplot
+```{r}
+#heatmap + lolliplot + plot_layout(widths = c(2, 0.8), heights = c(1, 1))
+
+cowplot::plot_grid(heatmap ,    lolliplot , 
+                           align = "h", 
+                           ncol = 2,  axis = "tb",
+                           rel_widths = c(5, 1))
+ggsave("../plots/Figure4/heatmapMF_PiYG.pdf", width  =17, height=12)
+
+
+ggsave("../plots/Figure4/heatmapMF_PiYG_quantile_colorscheme.pdf", width  =17, height=12)
+
+```
+
+
+
+### Clustering Heatmap
+```{r}
+heatmap_input<- t(GOmixer_inferredMFs %>% ungroup() %>% arrange(rej) %>% select(SampleID, fc_levels) %>% column_to_rownames("SampleID"))# %>% mutate(across(everything(.),scale))) 
+
+rejection_cluster<-  picrust_metadata %>% filter(SampleID %in% in_samples) %>% select(SampleID, rej) %>% mutate(rej=case_when(rej==0 ~ "Non Rejection", T~"Rejection")) %>% column_to_rownames("SampleID")
+
+#mf_cluster <- MF_annotations %>% mutate(hierarchy1= case_when(hierarchy2 == "butyrate metabolism" ~ "butyrate metabolism", hierarchy2 =="acetate metabolism" ~ "acetate metabolism", T ~ hierarchy1)) %>%select(Feature, hierarchy1)
+```
+color scheme
+```{r}
+quantile_breaks <- function(xs, n = 10) {
+  breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+  breaks[!duplicated(breaks)]
+}
+
+mat_breaks <- quantile_breaks(apply(heatmap_input,1, scale)  , n = 11)
+
+```
+
+clustered by k means 
+```{r}
+## with fitted color scheme
+pheatmap(heatmap_input, scale = "row", cluster_rows = F,  cluster_cols=T, annotation_col =rejection_cluster, cutree_rows = 2, annotation_colors = list(rej=c( "Non Rejection"="#0072B5FF","Rejection"="#BC3C29FF")), show_colnames = F,color             = rev(viridis(length(mat_breaks) - 1)),
+  breaks            = mat_breaks)  
+
+## no fitting
+pheatmap(heatmap_input, scale = "row", cluster_rows = F,  cluster_cols=T, annotation_col =rejection_cluster, cutree_rows = 2, annotation_colors = list(rej=c( "Non Rejection"="#0072B5FF","Rejection"="#BC3C29FF")), show_colnames = F,color  = rev(viridis(30)) ) 
+
+
+ggsave("../plots/Figure4/clustered_heatmapMF_viridis.pdf", width  =12, height=10)
+
+```
+
+
+
+
+## PCA
+### based on the GO MF abundances
+```{r}
+MF_pcas<- prcomp(GOmixer_inferredMFs %>% ungroup() %>% select(-rej, -age,-sex, -PatientID) %>% column_to_rownames("SampleID"), scale=T)
+```
+
+
+```{r}
+
+MF_pca12 <- as.data.frame(predict(MF_pcas)[,1:2]) %>% rownames_to_column("SampleID") %>% left_join(GOmixer_inferredMFs %>% select(SampleID, rej), by="SampleID")
+
+centroid_data <- MF_pca12 %>%
+  group_by(rej) %>%
+  summarise(centroid_x = mean(PC1), centroid_y = mean(PC2))
+
+## adding variance captured to the axis
+pca_labels <- paste0(c("PC 1 ", "PC 2"), c("(" , "("), round(summary(MF_pcas)$importance[2,1:2]*100, 2), c("%)","%)"))
+
+#autoplot(MF_pcas, data = GOmixer_inferredMFs %>% ungroup(), colour = 'rej',frame = TRUE, frame.type = 'norm', alpha=0) 
+
+
+ggplot(MF_pca12, aes(x=PC1, y=PC2, color = rej)) + 
+  geom_point() +
+  theme_bw() +
+    stat_ellipse() + # Add ellipses
+  #geom_polygon(stat = "ellipse", aes(fill = rej, color=rej), alpha = 0.3)   +
+  theme_classic()+
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    legend.position = "top",
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+   geom_point(data = centroid_data, aes(x = centroid_x, y = centroid_y,fill=rej),color="black", size = 5, shape=22, show.legend = F) +
+   scale_fill_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" ))+ 
+  scale_color_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" ))+ 
+  xlab(pca_labels[1]) + ylab(pca_labels[2])
+
+
+ggsave("../plots/Figure4/PCA_MF.pdf", width  =5.5, height=4)
+
+
+```
+
+###based on KO 
+
+```{r}
+
+
+KO_pcas<- prcomp(t(abundance %>% select(function., in_samples) %>% column_to_rownames("function."))  %>% remove_constant(quiet=F)
+, scale=T)
+
+KO_pca12 <- as.data.frame(predict(
+KO_pcas)[,1:2]) %>% rownames_to_column("SampleID") %>% left_join(GOmixer_inferredMFs %>% select(SampleID, rej), by="SampleID")
+
+centroid_data <- KO_pca12 %>%
+  group_by(rej) %>%
+  summarise(centroid_x = mean(PC1), centroid_y = mean(PC2))
+
+## adding variance captured to the axis
+pca_labels <- paste0(c("PC 1 ", "PC 2"), c("(" , "("), round(summary(KO_pcas)$importance[2,1:2]*100, 2), c("%)","%)"))
+
+#autoplot(MF_pcas, data = GOmixer_inferredMFs %>% ungroup(), colour = 'rej',frame = TRUE, frame.type = 'norm', alpha=0) 
+
+
+ggplot(KO_pca12, aes(x=PC1, y=PC2, color = rej)) + 
+  geom_point() +
+  theme_bw() +
+    stat_ellipse() + # Add ellipses
+  #geom_polygon(stat = "ellipse", aes(fill = rej, color=rej), alpha = 0.3)   +
+  theme_classic()+
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    legend.position = "top",
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+   geom_point(data = centroid_data, aes(x = centroid_x, y = centroid_y,fill=rej),color="black", size = 5, shape=22, show.legend = F) +
+   scale_fill_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" ))+ 
+  scale_color_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" ))+ 
+  xlab(pca_labels[1]) + ylab(pca_labels[2])
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

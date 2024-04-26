@@ -1,0 +1,1521 @@
+---
+title: "Alpha & Beta Diversity: Cross Sectional Comparison"
+output: html_notebook
+---
+This script contains the analysis between the different subgroups, mainly focusing on alpha and beta diversity
+The association analysis of bacterial counts and clinical conditions is in the script "prepMasterTable_paperRun"
+
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+
+#1. Reading Files
+
+```{r}
+library(readr)
+library("phyloseq")
+library("ggplot2")
+library("vegan")
+library(dplyr)
+library(fastDummies)
+library(ggpubr)
+#library(EnhancedVolcano)
+
+##basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+#generating basic.info can be done with the R script "create_basicinfo_table.R"
+
+basic.info <- read_delim("../basic_info.csv", delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+names(basic.info)[10] <- "age"
+names(basic.info)[22] <- "sex_donor"
+names(basic.info)[23] <- "age_donor"
+
+basic.info <- dummy_cols(basic.info, select_columns= "age_donor" ,ignore_na = T,  remove_selected_columns = TRUE)
+
+
+load("../../DZIF_Lotus2SLV138/phyloseq.Rdata")
+
+# for all 566 samples 
+physeq <- subset_samples(physeq, ! sample_names(physeq) %in% c("T090626_S72" ,"T071782_S7") )
+
+## get exact order
+correct_order <- rownames(sample_data(physeq))
+basic.info<- basic.info[match(correct_order, basic.info$SampleID),]
+
+rownames(basic.info) <- basic.info$SampleID
+
+basic.info<- basic.info %>% mutate(rej= case_when(
+         Holle_class %in% c( "normal") ~ 0,
+         T ~ 1
+          ))
+
+## important!!
+class(basic.info) <- "data.frame"
+
+
+sample_data(physeq) <-basic.info
+
+
+ps.rarefied <- rarefy_even_depth(physeq, rngseed=1, sample.size=min(sample_sums(physeq)), replace=F)
+```
+#2. 16S statistics 
+
+```{r}
+nrow(otu_table(ps.rarefied))
+
+#n_sp<- nrow(otu_table(tax_glom(ps.rarefied, "Species")))
+n_gen<- nrow(otu_table(tax_glom(ps.rarefied, "Genus")))
+n_fam<- nrow(otu_table(tax_glom(ps.rarefied, "Family")))
+n_ord<- nrow(otu_table(tax_glom(ps.rarefied, "Order")))
+n_cla<- nrow(otu_table(tax_glom(ps.rarefied, "Class")))
+n_phy<- nrow(otu_table(tax_glom(ps.rarefied, "Phylum")))
+
+OTU_vis_data <- data.frame(taxa= c( "Genus", "Family", "Order", "Class", "Phylum"), number= c(n_gen,n_fam,n_ord,n_cla,n_phy))
+
+
+ggplot(OTU_vis_data , aes(x=reorder(taxa,-number)  ,y=number , fill= taxa)) + 
+  geom_col(stat="identity", width=0.8) +
+  geom_text(aes(label = number), color = "black", hjust=-0.5,  size=4)  +
+  coord_flip() +
+  xlab("") + ylab("") +
+  theme(
+    axis.text.x = element_text(color="black"),
+    axis.text.y = element_text(color="black"),
+    axis.ticks = element_line(color = "black"),
+    legend.position = "none"
+  )
+```
+
+
+#3. Alpha diversities measurements
+```{r}
+library(microbiome)
+
+summarize_phyloseq(ps.rarefied)
+
+pruned.ps <- prune_taxa(taxa_sums(ps.rarefied) >0, ps.rarefied)
+
+alpha_measurements<- alpha(pruned.ps, index="all")
+
+not_rar_alphas <-  microbiome::alpha(prune_taxa(taxa_sums(physeq) >0, physeq), index="all")
+
+head(alpha_measurements)
+
+all.together <- cbind(basic.info, alpha_measurements)
+
+not_rar_alphas <- cbind(extended.basic.info , microbiome::alpha(prune_taxa(taxa_sums(physeq) >0, physeq), index="all"))
+
+```
+
+
+
+#5. Pre KT: rejection vs non rejection
+baseline signature of HD 
+
+```{r}
+BL.cohort <-c(filter(newlist, Select_neu==1) %>% pull(SampleID))
+
+BL_physeq <- subset_samples(ps.rarefied, OTU_name %in% preKT_samples)
+
+```
+
+## alpha diversity 
+
+```{r}
+plot_richness(BL_physeq, x="PatientID", color= "rej", shape="Holle_class" ,measures=c("Observed", "Shannon"))   + labs(shape= "Rejection Type", color="Rejection")
+plot_richness(BL_physeq, x="PatientID", color= "rej" ,measures=c("Observed", "Shannon")) + labs( color="Rejection")
+
+
+
+BL_alpha_div <- create_alpha_violin(input=filter(all.together, OTU_name %in% preKT_samples ) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection")) , 
+                                      split.var = "rej", 
+                                    metric= "diversity_shannon",
+                                     ylabel="Shannon Index") +  scale_fill_nejm(na.translate = F) +
+  theme_bw() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position = "none",
+    
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )
+
+ggsave("../plots/preKT/alpha_n26.pdf", BL_alpha_div, width = 6.5, height=4)
+```
+
+## beta diversity
+```{r}
+sample_data(BL_physeq)$rej <- as.factor(sample_data(BL_physeq)$rej)
+bray_ordination_BL <- ordinate(BL_physeq, method="PCoA", distance="bray")
+
+BL_betaplot<- plot_ordination(BL_physeq, bray_ordination_BL, color="rej")  + 
+  geom_point(size=2.3) + scale_shape_manual(values = c(5, 16),na.translate = F) + 
+   theme_bw() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + 
+  scale_color_nejm(na.translate = F,labels = c("Normal Progess", "Rejection")) 
+
+
+permanova_BL <- adonis2(phyloseq::distance(BL_physeq, method="bray") ~ rej, as(sample_data(BL_physeq), "data.frame"))
+
+permanova_text <- paste(c("PERMANOVA (adonis)", paste0("pseudo-F: ", round(permanova_BL$F[1],2)), paste0("p-value: ",  permanova_BL$`Pr(>F)`[1]   )), collapse="\n")
+  
+
+BL_betaplot<- BL_betaplot +   annotate(geom="text", x=-0.6, y=0.38, label= permanova_text,  hjust = 0 )
+
+ggsave("../plots/preKT/beta_n26.pdf", BL_betaplot, width = 5.5, height=4)
+```
+
+##  abundance analysis
+
+```{r}
+BL.meta.input<- generate_meta_input(sample_data(BL_physeq), "rej")
+BL.meta.input$rej <- as.numeric(as.character(BL.meta.input$rej))
+
+BL.genus.output<- run_metadeconfound("Genus",  path, BL.meta.input)
+
+BL.family.output <- run_metadeconfound("Family",  path, BL.meta.input)
+
+
+save(file="BL_genus.Rdata", BL.genus.output)
+
+create_heatmap_pdf(M.family.output, matched.outpath, "Family")
+
+
+
+```
+#6. Cohort 2: Prior Rejectio vs Non Rejection
+
+```{r}
+cohort2 <- newlist %>% filter(Select_neu==2) %>% pull(SampleID)
+
+cohort2_physeq <- subset_samples(ps.rarefied, OTU_name %in% cohort2)
+
+reduced_cohort2_physeq <- subset_samples(physeq, SampleID %in% in_samples)
+
+```
+
+
+## 6.1 C2: Alpha Diversity
+### Multiple Testing Correction
+```{r}
+c2_alpha_stats <- not_rar_alphas  %>% filter(SampleID %in% cohort2_Ids ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej, observed, starts_with("diversity"),starts_with("evenness"), chao1) %>% gather("metric", "value", observed, starts_with("diversity"),starts_with("evenness"), chao1 ) %>% group_by(metric)%>% wilcox_test(value ~rej) %>% adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+
+removed_c2_alpha_stats <- not_rar_alphas %>% filter(SampleID %in% in_samples ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej, observed, starts_with("diversity"),starts_with("evenness"), chao1) %>% gather("metric", "value", observed, starts_with("diversity"),starts_with("evenness"), chao1 ) %>% group_by(metric)%>% wilcox_test(value ~rej) %>% adjust_pvalue(method = "BH") %>%
+  add_significance() 
+
+c2_alpha_stats %>% filter(p< 0.05)
+```
+
+
+### Simple visualization: plot for every metric separated
+```{r}
+cohort2_alpha_div <-create_alpha_violin(input=filter(all.together, OTU_name %in% cohort2 ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")), 
+                                      split.var = "rej", 
+                                      metric= "diversity_inverse_simpson",
+                                     ) + ylab("Inverse Simpson Index")
+
+metric_list <- colnames(all.together)[startsWith(colnames(all.together),"evenness" ) | startsWith(colnames(all.together),"diversity" ) ]
+
+
+for (metric in metric_list){
+  
+  plot <- create_alpha_violin(input=filter(all.together, OTU_name %in% cohort2 ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")), 
+                                      split.var = "rej", 
+                                      metric= metric,
+                                      labels = c("0"= "normal", "1"= "rejection"))
+
+
+ filename <- paste('../plots/cohort2/' , metric, ".png", sep="") 
+ ggsave(filename, plot = plot, device = 'png')
+
+}
+```
+
+### Nicer Visualization
+
+with p adjustment
+not yet nice looking 
+ ggboxplot(x="rej", y="value", fill="rej",  width = 0.8,  facet.by = "metric", scales="free", add=c("jitter","violin") ) + stat_pvalue_manual(
+    c2_alpha_stats %>% filter(metric %in% c( "diversity_gini_simpson", "diversity_shannon","evenness_pielou")) %>% add_xy_position(x = "rej") %>% mutate(y.position= y.position-52), label="p.adj", bracket.nudge.y = -2 ) + scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))
+  
+```{r}
+all.together %>% rename( SampleID=OTU_name) %>% filter(SampleID %in% cohort2_Ids ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej, evenness_pielou, diversity_shannon,diversity_gini_simpson) %>% gather("metric", "value", evenness_pielou, diversity_shannon,diversity_gini_simpson ) %>% mutate(metric=factor(metric, levels=c( "diversity_gini_simpson", "diversity_shannon","evenness_pielou"))) %>%
+  
+  
+
+   ggplot(aes(x=rej,y=value)) + geom_violin(aes(fill=rej)) +
+   facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("diversity_fisher" = "Fisher Index",
+      "diversity_shannon" = "Shannon Index",
+      "diversity_gini_simpson" = "Gini Simpson Index",
+     "evenness_pielou"= "Pielou Evenness")
+  )) + scale_fill_nejm() + 
+    geom_boxplot(color="black",  alpha=0, width=0.45) +
+ geom_jitter() + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_pvalue_manual(
+    c2_alpha_stats %>% filter(metric %in% c( "diversity_gini_simpson", "diversity_shannon","evenness_pielou")), label="p.adj", bracket.nudge.y = -2 ) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.1)))
+  
+  #%>% add_xy_position(x = "rej", fun="mean_se", scales = "free")
+ 
+```
+
+  
+
+
+#### Plot for chosen metrics 
+```{r}
+c2_three_alphas <- 
+all.together %>% rename( SampleID=OTU_name) %>% filter(SampleID %in% cohort2_Ids ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej, evenness_pielou, diversity_shannon,diversity_gini_simpson) %>% gather("metric", "value", evenness_pielou, diversity_shannon,diversity_gini_simpson ) %>% mutate(metric=factor(metric, levels=c( "diversity_gini_simpson", "diversity_shannon","evenness_pielou"))) %>%
+  
+   ggplot(aes(x=rej,y=value, fill=rej)) + geom_violin() +  geom_boxplot(color="black",  alpha=0, width=0.45) +
+ geom_jitter() + xlab("") + ylab("") + 
+stat_compare_means( size=3.7,label.x.npc = "center", label= "p.format" ) +
+  theme_bw() + 
+   theme(
+    strip.text = element_text(size=11),
+    strip.background = element_rect(fill="white", linewidth = 0),
+    line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   
+    panel.background = element_blank()) + facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("diversity_fisher" = "Fisher Index",
+      "diversity_shannon" = "Shannon Index",
+      "diversity_gini_simpson" = "Gini Simpson Index",
+     "evenness_pielou"= "Pielou Evenness")
+  )) + scale_fill_nejm()
+
+c2_three_alphas
+ggsave("../plots/cohort2/latex_three_alphadivs.pdf",height=4, width=8, c2_three_alphas)
+
+```
+
+for removed c2 : boxplot instead of violins
+```{r}
+#c2_alpha_plt2<- all.together %>% rename( SampleID=OTU_name)
+not_rar_alphas %>% filter(SampleID %in% in_samples ) %>% mutate(rej=case_when(rej==0 ~ "Non Rejection", T~ "Rejection")) %>% select(rej, observed, diversity_shannon,evenness_simpson) %>% gather("metric", "value", observed, diversity_shannon,evenness_simpson ) %>% mutate(metric=factor(metric, levels=c( "observed", "diversity_shannon","evenness_simpson"))) %>%
+  
+  ggplot(aes(x=rej,y=value, fill=rej)) + 
+    scale_fill_manual(breaks=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))+
+    geom_boxplot(color="black") +
+ geom_jitter(widht=0.2,size=1.8) + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=5,label.x.npc = "center", label= "p.format" ) +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=15),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) + 
+  facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("observed" = "observed OTUs",
+      "diversity_shannon" = "Shannon Index",
+     "evenness_simpson"= "Simpson Evenness") )) 
+  
+
+
+ggsave("../plots/Figure3/c2_alphas_obser_shn_simp_boxplots.pdf",height=5, width=9)
+
+
+```
+
+#### All metrics together
+```{r}
+c2_alpha_divs <- all.together %>% rename( SampleID=OTU_name) %>% filter(SampleID %in% cohort2_Ids ) %>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej,  starts_with("diversity"), starts_with("evenness"), observed, chao1) %>% gather("metric", "value", starts_with("diversity"), starts_with("evenness"), observed, chao1 ) %>%
+  
+  ggplot(aes(x=rej,y=value, fill=rej)) + geom_violin() +
+    geom_boxplot(color="black",  alpha=0, width=0.45) +
+ geom_jitter() + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=3,label.x.npc = "center", vjust=0.5, label= "p.format" ) +
+  theme_bw() + 
+   theme(
+    strip.text = element_text(size=11),
+    strip.background = element_blank(),
+    line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=10),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   
+    panel.background = element_blank()) + facet_wrap(~metric, nrow=4, scales="free_y", labeller = labeller(metric = 
+   c("diversity_fisher" = "Fisher Index",
+      "diversity_shannon" = "Shannon Index",
+      "diversity_gini_simpson" = "Gini Simpson Index",
+     "evenness_pielou"= "Pielou Evenness",
+     "chao1"= "Chao1",
+     "diversity_coverage"= "Coverage Diversity",
+     "diversity_inverse_simpson"= "Inverse Simpson Index",
+     "evenness_bulla"= "Bulla Evenness",
+     "evenness_evar"= "Evar Evenness",
+     "evenness_camargo"="Camargo Evenness",
+     "evenness_pielou"="Pielou Evenness",
+     "evenness_simpson"="Simpson Evenness",
+     "observed"= "Observed OTUs"
+     )
+  )) 
+
+
+c2_alpha_all_boxplots <- all.together %>% rename( SampleID=OTU_name) %>% filter(SampleID %in% cohort2_Ids & (! SampleID %in% out_samples) )%>% mutate(rej=case_when(rej==0 ~ "Normal Progress", T~ "Rejection")) %>% select(rej,  starts_with("diversity"), starts_with("evenness"), observed, chao1) %>% gather("metric", "value", starts_with("diversity"), starts_with("evenness"), observed, chao1 ) %>%
+  
+  ggplot(aes(x=rej,y=value, fill=rej))  +
+    geom_boxplot(color="black") +
+ geom_jitter(width=0.2,size=1.1) + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=3,label.x.npc = "center", vjust=0.25, label= "p.format" ) +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=11),
+    strip.background = element_blank(),
+    line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=10),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   
+    panel.background = element_blank()) + facet_wrap(~metric, nrow=4, scales="free_y", labeller = labeller(metric = 
+   c("diversity_fisher" = "Fisher Index",
+      "diversity_shannon" = "Shannon Index",
+      "diversity_gini_simpson" = "Gini Simpson Index",
+     "evenness_pielou"= "Pielou Evenness",
+     "chao1"= "Chao1",
+     "diversity_coverage"= "Coverage Diversity",
+     "diversity_inverse_simpson"= "Inverse Simpson Index",
+     "evenness_bulla"= "Bulla Evenness",
+     "evenness_evar"= "Evar Evenness",
+     "evenness_camargo"="Camargo Evenness",
+     "evenness_pielou"="Pielou Evenness",
+     "evenness_simpson"="Simpson Evenness",
+     "observed"= "Observed OTUs"
+     )
+  )) +   scale_fill_manual(breaks=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))
+
+
+
+
+ggsave("../plots/cohort2/reduced_c2_all_alpha_boxplots.pdf",height=8, width=7, c2_alpha_all_boxplots)
+
+```
+
+##6.2. C2: Beta diversity
+
+```{r}
+permanova_c2 <- adonis2(phyloseq::distance(reduced_cohort2_physeq, method="bray") ~ rej, as(sample_data(reduced_cohort2_physeq), "data.frame"))
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_c2$F[1],2)), paste0("p-value: ",  permanova_c2$`Pr(>F)`[1]   )), collapse="\n")
+                  
+
+
+bray_ordination_cohort2 <- ordinate(reduced_cohort2_physeq, method="PCoA", distance="bray")
+```
+
+
+```{r}
+#c2_beta_plot <- 
+plot_ordination(reduced_cohort2_physeq, bray_ordination_cohort2, color="rej") +   
+  geom_point(size=2.3, aes(color=rej)) +
+   theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=10),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) +   annotate(geom="text", x=0.83, y=-0.35, label= permanova_text, size=3.1,  hjust = 0 ) +
+
+  stat_ellipse() + # Add ellipses
+
+  # Add centroids
+  geom_point(data = create_centroid_data(bray_ordination_cohort2, basic.info, "rej"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=rej), size = 5, shape=22, color="black") +
+  scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))+
+  scale_color_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))
+
+ggsave("../plots/Figure3/c2_beta.pdf", width=5.5, height=4)
+```
+
+
+```{r}
+# Convert from raw to relative abundance
+pn = transform_sample_counts(cohort2_physeq, function(x) 100 * x/sum(x))
+bray_curtis_matrix <- phyloseq::distance(cohort2_physeq, method="bray")
+
+# Run PERMANOVA using adonis
+#result <- adonis2(distance(pn, method = "bray") ~ rej, as(sample_data(pn), "data.frame"))
+
+
+#ggsave("../plots/cohort2/beta_c2_color.pdf", c2_beta_plot, width=8, height=4.5)
+
+```
+
+
+#7 Complete Cohort
+
+```{r}
+pseudolong.info <-  basic.info %>% mutate( pseudo_long_group = case_when(
+    origin == "Spender" ~ "donor", 
+    origin== "Empfänger" & rej==0  & Transplantation_day_diffs <=0 ~ "pre TX normal",
+    origin== "Empfänger" & rej==1  & Transplantation_day_diffs <=0 ~ "pre TX rej",
+    
+    origin== "Empfänger" & rej==0  & Transplantation_day_diffs >0  & Transplantation_day_diffs <= 90 ~ "0-3 TX normal",
+    origin== "Empfänger" & rej==1  & Transplantation_day_diffs >0  & Transplantation_day_diffs <= 90 ~ "0-3 TX rej",
+    
+    origin== "Empfänger" & rej==0  & Transplantation_day_diffs > 90  & Transplantation_day_diffs <= 365 ~ "3-12 TX normal",
+    origin== "Empfänger" & rej==1  & Transplantation_day_diffs > 90  & Transplantation_day_diffs <= 365 ~ "3-12 TX rej",
+    
+    origin== "Empfänger" & rej==1  & Transplantation_day_diffs > 365  & Transplantation_day_diffs <= 730 ~ "12-24 TX rej",
+    origin== "Empfänger" & rej==0  & Transplantation_day_diffs > 365  & Transplantation_day_diffs <= 730 ~ "12-24 TX normal",
+
+
+    origin== "Empfänger"& rej==0 & Transplantation_day_diffs > 730  & Transplantation_day_diffs <= 1095 ~ "24-36 TX normal",
+    origin== "Empfänger"& rej==1 & Transplantation_day_diffs > 730  & Transplantation_day_diffs <= 1095 ~ "24-36 TX rej",
+    
+    
+    origin== "Empfänger"& rej==1 & Transplantation_day_diffs > 1095 ~ "> 36 TX rej",
+    origin== "Empfänger"& rej==0 & Transplantation_day_diffs > 1095 ~ "> 36 TX normal",
+   T ~ NA
+    ))
+
+
+
+pseudolong.info <- pseudolong.info %>% mutate( pseudo_long_classes = case_when(
+    origin == "Spender" ~ "donor", 
+    origin== "Empfänger" & Holle_class == "normal" ~ "normal progress",
+    origin== "Empfänger" & Holle_class != "normal" ~ "rejection",
+    T~ NA
+    ))
+
+pseudolong.info$pseudo_long_classes<- factor(pseudolong.info$pseudo_long_classes, level=c("donor", "normal progress", "rejection" ))
+
+#pseudolong.info$pseudo_long_group<- factor(pseudolong.info$pseudo_long_group, level=c("donor",  "3-12 TX normal",  "3-12 TX rej", "24-36 TX normal","24-36 TX rej" ))
+
+pseudolong.info %>% select(starts_with("pseudo"), Transplantation_day_diffs, PatientID, SampleID) %>% filter(is.na(pseudo_long_group))
+
+
+```
+
+##7.1 alpha diversity
+```{r}
+#"< -12 Event", "-0-12 Event", "0-12 Event", "> 12 Event", "-0-3 NTX", "0-12 NTX", "12-24 NTX", "24-36 NTX", ">36 NTX"
+library(ggpubr)
+library(rstatix)
+
+set.seed(111)
+
+pseudolong.alphas<- left_join(pseudolong.info ,not_rar_alphas %>% mutate(SampleID=rownames(not_rar_alphas)), by="SampleID")
+
+pseudolong.alphas <- pseudolong.alphas %>%
+  mutate(simplified_group = case_when(
+    pseudo_long_group %in% c("donor") ~ "donor",
+    pseudo_long_group %in% c("pre TX normal", "pre TX rej") ~ "pre KT",
+    pseudo_long_group %in% c("0-3 TX normal", "0-3 TX rej") ~ "0-3 KT",
+    pseudo_long_group %in% c("3-12 TX normal", "3-12 TX rej") ~ "3-12 KT",
+    pseudo_long_group %in% c("12-24 TX normal", "12-24 TX rej") ~ "12-24 KT",
+    pseudo_long_group %in% c("24-36 TX normal", "24-36 TX rej") ~ "24-36 KT",
+    pseudo_long_group %in% c("> 36 TX normal", "> 36 TX rej") ~ "> 36 KT",
+    
+    TRUE ~ as.character(pseudo_long_group)
+  ))
+
+pseudolong.alphas$simplified_group<- factor(pseudolong.alphas$simplified_group, level=c("donor", "pre KT" ,  "0-3 KT", "3-12 KT", "12-24 KT", "24-36 KT", "> 36 KT" ))
+
+pseudolong.alphas  %>% count(simplified_group)
+
+
+stats_manual <- pseudolong.alphas %>%filter( !is.na(simplified_group)) %>%   group_by(simplified_group) %>% wilcox_test(diversity_shannon ~ pseudo_long_classes) %>% add_significance()
+
+sample_sizes <- pseudolong.alphas %>% group_by(simplified_group) %>% count()
+
+
+comparisons <- list( c("pre KT", "0-3 KT"), c( "0-3 KT","3-12 KT"), c("3-12 KT", "12-24 KT"), c("12-24 KT", "24-36 KT"), c("24-36 KT", "> 36 KT"),c("donor", "pre KT"), c("donor", "0-3 KT"), c("donor", "3-12 KT"), c("donor", "12-24 KT"),c("donor", "24-36 KT"),c("donor", "> 36 KT"))
+  
+comparisons <- list(  c("3-12 KT", "12-24 KT"), c("3-12 KT", "24-36 KT"), c("3-12 KT", "> 36 KT"))
+comparisons <- list( c("3-12 KT", "12-24 KT"), c("3-12 KT", "24-36 KT"), c("3-12 KT", "> 36 KT"), c("donor", "pre KT"), c("donor", "3-12 KT"), c("donor", "12-24 KT"),c("donor", "24-36 KT"),c("donor", "> 36 KT"))
+
+xlabs <- paste0(as.factor(sample_sizes$simplified_group), "\nn=", sample_sizes$n)
+```
+###7.1.0 Multiple testing correction
+
+```{r}
+
+pseudolong_alpha_stats <- pseudolong.alphas %>% filter(!is.na(Transplantation_day_diffs) & simplified_group != "0-3 KT") %>% mutate(simplified_group= as.character(simplified_group))%>% wilcox_test(diversity_shannon ~ simplified_group)
+  
+pseudolong_alpha_stats %>% filter(group1 == "donor" | group2 == "donor")  %>% mutate(p.adj= p.adjust(p, "fdr"))
+
+```
+
+### 7.1.1 Visualization
+```{r}
+pseudo_alphaplot <- ggplot(pseudolong.alphas %>% filter(!is.na(Transplantation_day_diffs) & simplified_group != "0-3 KT") %>% left_join(sample_sizes), 
+       
+       aes(x=simplified_group, y= diversity_shannon,fill=simplified_group))+
+  #geom_violin(aes(fill=simplified_group)) +
+  geom_boxplot(color = "black", width=0.7) +   xlab("")+ ylab("Shannon Index")  +
+   #geom_jitter(width=0.2,size=1.1) + 
+  theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(5)))) +
+    scale_x_discrete(labels=xlabs[-3]) + 
+  #stat_compare_means(comparisons = comparisons, label.y = c(seq(4.5,4.9, by=0.1), seq(5.2,7.48,by=0.38) ))
+  stat_compare_means(comparisons = comparisons,size=3.8)
+
+
+plot_alphas_complete_cohort <- function(pseudolong.alphas, diversity, threemonths_out=T, comparisons){
+  
+  sample_sizes <- pseudolong.alphas %>% group_by(simplified_group) %>% count()
+
+  xlabs <- paste0(as.factor(sample_sizes$simplified_group), "\nn=", sample_sizes$n)
+  
+  plot_df <- pseudolong.alphas %>% filter(!is.na(Transplantation_day_diffs))
+  if (threemonths_out){
+    plot_df <- pseudolong.alphas %>% filter( simplified_group != "0-3 KT")
+  }
+  
+  plot<- ggplot(plot_df %>% left_join(sample_sizes), 
+       aes_string(y=diversity, x="simplified_group",fill="simplified_group"))+
+  #geom_violin(aes(fill=simplified_group)) +
+  geom_boxplot( color = "black", width=0.7) +   xlab("")+ ylab(diversity)  +
+   #geom_jitter(width=0.2,size=1.1) + 
+  theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=10),
+    
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=10),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )+ scale_fill_nejm()
+  
+  if(threemonths_out){
+    return(plot +   scale_x_discrete(labels=xlabs[-3]) + 
+  #stat_compare_means(comparisons = comparisons, label.y = c(seq(4.5,4.9, by=0.1), seq(5.2,7.48,by=0.38) ))
+  stat_compare_means(comparisons = comparisons,size=3.3)
+)
+  }
+  else(return(plot +  stat_compare_means(comparisons = comparisons,size=3.3)+ scale_x_discrete(labels=xlabs)))
+  
+}
+
+  ggsave("../plots/Figure1/total_cohort_simpson_eveness.pdf" , plot_alphas_complete_cohort(pseudolong.alphas , "evenness_simpson") + ylab("Simpson Evennes")+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(5)))), width=6.5, height=4)
+
+ ggsave("../plots/Figure1/total_cohort_observed_otus.pdf" ,  plot_alphas_complete_cohort(pseudolong.alphas , "observed") + ylab("Number of observed OTUs") +  scale_fill_manual(values = c("#FCA108FF",rev(viridis(5)))), width=6.5, height=4)
+
+ ggsave("../plots/Figure1/total_cohort_shannon.pdf" ,plot_alphas_complete_cohort(pseudolong.alphas , "diversity_shannon") + ylab("Shannon Index")+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(5)))), width=6.5, height=4)
+
+
+```
+### 7.1.1.1 with 0-3 Months
+```{r}
+
+
+
+comparisons_03 <- list(  c("0-3 KT", "3-12 KT"), c("0-3 KT", "12-24 KT"), c("0-3 KT", "24-36 KT"), c("0-3 KT", "> 36 KT"), c("3-12 KT", "12-24 KT"), c("3-12 KT", "24-36 KT"), c("3-12 KT", "> 36 KT"), c("donor", "pre KT"), c("donor", "0-3 KT"), c("donor", "3-12 KT"), c("donor", "12-24 KT"),c("donor", "24-36 KT"),c("donor", "> 36 KT"))
+
+
+ ggsave("../plots/Figure1/total_cohort_simpson_eveness_03Months.pdf",plot_alphas_complete_cohort(pseudolong.alphas , "evenness_simpson", threemonths_out = F, comparisons = comparisons_03) + ylab("Simpson Evennes")+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(6)))),  width=7, height=4.5)
+
+
+ ggsave("../plots/Figure1/total_cohort_shannon_03Months.pdf",  plot_alphas_complete_cohort(pseudolong.alphas , "diversity_shannon", threemonths_out = F, comparisons = comparisons_03) + ylab("Shannon Index")+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(6)))),width=7, height=4.5 )
+
+ggsave("../plots/Figure1/total_cohort_observed_otus_03Months.pdf" , plot_alphas_complete_cohort(pseudolong.alphas , "observed", threemonths_out = F, comparisons = comparisons_03) + ylab("Number of observed OTUs")+ scale_fill_manual(values = c("#FCA108FF",rev(viridis(6)))), width=7, height=4.5)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+##7.2 Beta diversity
+
+```{r}
+sample_data(physeq)
+
+sample_data(physeq) <- pseudolong.info  %>% mutate(simplified_group = case_when(
+    pseudo_long_group %in% c("donor") ~ "donor",
+    pseudo_long_group %in% c("pre TX normal", "pre TX rej") ~ "pre KT",
+    pseudo_long_group %in% c("0-3 TX normal", "0-3 TX rej") ~ "0-3 KT",
+    pseudo_long_group %in% c("3-12 TX normal", "3-12 TX rej") ~ "3-12 KT",
+    pseudo_long_group %in% c("12-24 TX normal", "12-24 TX rej") ~ "12-24 KT",
+    pseudo_long_group %in% c("24-36 TX normal", "24-36 TX rej") ~ "24-36 KT",
+    pseudo_long_group %in% c("> 36 TX normal", "> 36 TX rej") ~ "> 36 KT",
+    
+    TRUE ~ as.character(pseudo_long_group)
+  ) ) %>% column_to_rownames("SampleID")
+
+
+sample_data(physeq)$simplified_group = factor(sample_data(physeq)$simplified_group , level=c("donor", "pre KT" ,  "0-3 KT", "3-12 KT", "12-24 KT", "24-36 KT", "> 36 KT" ))
+
+#  & simplified_group!="0-3 KT"
+pseudo_bray_ordination <- ordinate(subset_samples( physeq, !is.na(simplified_group)), method="PCoA", distance="bray")
+
+permanova_pseudolong<- vegan::adonis2(phyloseq::distance(subset_samples( physeq, !is.na(simplified_group)  ), method="bray") ~ simplified_group, 
+        as(sample_data(subset_samples( physeq, !is.na(simplified_group) )), "data.frame"))
+
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_pseudolong$F[1],2)), paste0("p-value: ",  permanova_pseudolong$`Pr(>F)`[1]   )), collapse="\n")
+
+permanova_text
+```
+
+
+```{r}
+
+create_centroid_data <- function(bray_ordination, meta.data, grouping ){
+  return(left_join(as.data.frame(bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+                            meta.data %>% select(SampleID, !!!syms(grouping ))
+                            , by="SampleID")%>%
+  group_by(!!!syms(grouping) ) %>%
+  summarise(centroid_x_mean = mean(Axis.1), centroid_y_mean = mean(Axis.2),  centroid_x_median = median(Axis.1), centroid_y_median = median(Axis.2))
+)
+} 
+
+# Plot PCoA with ellipses and centroids
+plot_ordination(
+  subset_samples(physeq, !is.na(simplified_group) ),
+  pseudo_bray_ordination,
+  color = "simplified_group"
+) +
+  geom_point(size = 1.5) +
+  scale_shape_manual(values = c(5, 16, 17), na.translate = FALSE) +
+  scale_color_nejm(na.translate = FALSE) +
+  theme_bw() +
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+  annotate("text", size = 3.2, y = -0.35, x = 0.4, label = permanova_text, hjust = 0) +
+  scale_color_manual(values = c("#FCA108FF", rev(viridis(6))), na.translate = FALSE) +
+  scale_fill_manual(values = c("#FCA108FF", rev(viridis(6))), na.translate = FALSE) +
+
+  stat_ellipse() + # Add ellipses
+
+  # Add centroids
+  geom_point(data = create_centroid_data(pseudo_bray_ordination, data.frame(sample_data(physeq)) %>% rownames_to_column("SampleID") , "simplified_group"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=simplified_group), size = 5, shape=22, color="black")
+
+ggsave("../plots/Figure1/total_cohort_beta_03Months.pdf" , width=7,height=4.5)
+
+```
+
+
+
+
+#8. All Rejection vs non Rejection 
+
+##8.1 With Time Discrimination
+```{r}
+complete.recipient.alphas <- left_join( pseudolong.info %>% mutate(simplified_group = case_when(
+    pseudo_long_group %in% c("donor") ~ "donor",
+    pseudo_long_group %in% c("pre TX normal", "pre TX rej") ~ "pre KT",
+    pseudo_long_group %in% c("0-3 TX normal", "0-3 TX rej") ~ "0-3 KT",
+    pseudo_long_group %in% c("3-12 TX normal", "3-12 TX rej") ~ "3-12 KT",
+    pseudo_long_group %in% c("12-24 TX normal", "12-24 TX rej") ~ "12-24 KT",
+    pseudo_long_group %in% c("24-36 TX normal", "24-36 TX rej") ~ "24-36 KT",
+    pseudo_long_group %in% c("> 36 TX normal", "> 36 TX rej") ~ "> 36 KT",
+    
+    TRUE ~ as.character(pseudo_long_group)
+  ) ) %>% mutate(simplified_group = factor(simplified_group, levels=c("donor", "pre KT", "0-3 KT", "3-12 KT", "12-24 KT", "24-36 KT", "> 36 KT")))  %>% filter(origin=="Empfänger" & Transplantation_day_diffs > 10) %>% mutate(group= factor(case_when(rej==0 ~ "Normal Progress", rej==1 & Event_day_diffs <= 3 ~ "Before Rejection", rej==1 & Event_day_diffs > 30 ~ "After Rejection", T ~ "out"), levels=c("Normal Progress", "Before Rejection", "After Rejection"))) , not_rar_alphas %>% mutate(SampleID=rownames(not_rar_alphas)), by="SampleID") 
+
+#%>% filter(!is.na(Transplantation_day_diffs) & simplified_group != "0-3 KT") %>% left_join(sample_sizes)
+pseudoalpha_recipient_plot <- ggplot(complete.recipient.alphas %>% filter(group!="out" & simplified_group != "0-3 KT") , 
+       aes_string(y="diversity_shannon", x="group",fill="group"))  + facet_wrap(~simplified_group)+
+  #geom_violin(aes(fill=simplified_group)) +
+  geom_boxplot( color = "black", width=0.7) +   xlab("")+ ylab("")  +
+   #geom_jitter(width=0.2,size=1.1) + 
+  theme_bw() + 
+   theme(
+   strip.text = element_text(size=10),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=9),
+    axis.text.x = element_text(color="black", size=9),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+    legend.title = element_blank(),
+    legend.position="none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) + scale_fill_nejm() + ylab("Shannon Index") +
+  stat_compare_means(comparisons =list(c("Normal Progress", "Before Rejection"), c("Before Rejection", "After Rejection")), method = "wilcox.test", label = "p.format", size=2.5) + scale_x_discrete(labels=c("Normal\nProgress", "Before\nRejection", "After\nRejection")) + scale_fill_manual(values=c( "#0072B5FF","#BC3C29FF","#E18727FF", "#20854EFF"))
+
+
+
+# ggsave("../plots/all_recipient_rejvsnormal_shannon.pdf" , pseudoalpha_recipient_plot , width=6, height=6.5)
+
+```
+##8.2 No time discrimination
+###8.2.1 Alpha Boxplot
+```{r}
+complete.recipient.alphas <- left_join(basic.info %>% filter(origin=="Empfänger" & Transplantation_day_diffs >= 1 ), not_rar_alphas %>% rownames_to_column("SampleID"), by="SampleID") %>% mutate(group= case_when(rej==0 ~ "Non Rejection", T ~ "Rejection"))
+
+rejector.alphas <- complete.recipient.alphas %>% filter(rej==1) %>% mutate(group= case_when(Event_day_diffs <=3 ~ "Before Rejection", Event_day_diffs >= 30 ~ "After Rejection", T ~ "out"))
+
+complete.recipient.alphas$group <- factor(complete.recipient.alphas$group, levels = c("Non Rejection", "Rejection", "Before Rejection", "After Rejection", "out") )
+```
+
+####8.2.1.1 Split Rej: Before and After
+```{r}
+ggplot(rbind(complete.recipient.alphas, rejector.alphas) %>% filter(group!="out") %>% select(group, diversity_shannon, observed, evenness_simpson) %>% gather( "metric", "value",diversity_shannon, observed, evenness_simpson), 
+       aes_string(y="value", x="group",fill="group")) + 
+  facet_wrap(~metric,  scales="free_y", labeller = labeller(metric = 
+   c("diversity_shannon" = "Shannon Index",
+     "evenness_simpson"="Simpson Evenness",
+     "observed"= "Observed OTUs")))+
+  geom_boxplot( color = "black", width=0.7) +   xlab("")+ ylab("")  +
+   #geom_jitter(width=0.2,size=1.1) + 
+  theme_classic() + 
+   theme(
+   strip.text = element_text(size=12),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=11),
+    legend.title = element_blank(),
+    legend.position="none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) + 
+  stat_compare_means(comparisons =list(c("Non Rejection", "Rejection"),c("Non Rejection", "Before Rejection"),c("Before Rejection", "After Rejection") ), method = "wilcox.test", label = "p.format", size=3) +
+scale_fill_manual( values = c( "Non Rejection" = "#0072B5FF", "Rejection" = "#BC3C29FF", "Before Rejection" ="Pale Violet Red 2" , "After Rejection" = "#8d3d75"))  + scale_x_discrete(labels= c("Non Rejection"="Non\nRejection", "Rejection"="Rejection", "Before Rejection"="Before\nRejection", "After Rejection"="After\nRejection"))
+
+ggsave("../plots/Figure2/alpha_all_nonrej_split_rej.pdf", height=4, width = 9)
+```
+
+
+
+
+####8.2.1.1 All Rej vs Non Rej
+```{r}
+ggplot(complete.recipient.alphas %>% select(rej, diversity_shannon, observed, evenness_simpson) %>% gather( "metric", "value",diversity_shannon, observed, evenness_simpson),
+       aes(y=value, x=rej,fill=rej))+  
+   facet_wrap(~metric,  scales="free_y", labeller = labeller(metric = 
+   c("diversity_shannon" = "Shannon Index",
+     "evenness_simpson"="Simpson Evenness",
+     "observed"= "Observed OTUs"))) +
+  #geom_violin(aes(fill=simplified_group)) +
+  geom_boxplot( color = "black", width=0.7) +   xlab("")+ ylab("")  +
+   #geom_jitter(width=0.2,size=1.1) + 
+  theme_classic() + 
+   theme(
+  strip.text = element_text(size=11),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=11),
+    axis.title.y  =element_text(size=12),
+    legend.title = element_blank(),
+    legend.position="none" ) +
+stat_compare_means( method = "wilcox.test", label.x.npc = "center", label = "p.format", size=3.5) +
+ scale_fill_manual( values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" )) + scale_x_discrete(labels=c("0"= "Non Rejection", "1"= "Rejection"))
+
+ggsave("../plots/Figure2/alpha_all_nonrej_rej.pdf", height=4, width = 7)
+
+```
+
+
+###8.2.3 Alpha Course over Time
+
+#### KT distance
+```{r}
+
+plot_alpha_timcourse <- function(metric, rug=F){
+plot <-  ggplot(complete.recipient.alphas%>% filter(Transplantation_day_diffs <= 1000)) +
+geom_smooth(alpha=0.2,aes_string(y=metric, x="Transplantation_day_diffs", color="group", fill="group")) + 
+  scale_fill_manual(values=c( "#0072B5FF","#BC3C29FF")) + scale_color_manual(values=c( "#0072B5FF","#BC3C29FF"))  + theme_classic() + 
+  theme(
+  strip.text = element_text(size=11),
+strip.background = element_blank(),
+ strip.placement = "outside", # panel.border = element_rect(colour = "black"),
+ # strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=11),
+    axis.title.y  =element_text(size=11),
+    legend.title = element_blank(),
+    legend.position="top" )+ xlab("Distance to KT in days")
+
+  if (rug){
+    plot <- plot+  geom_rug(data=complete.recipient.alphas %>% filter(rej==1 & distance_trans_rej <=1000 & origin=="Empfänger") %>% distinct(PatientID, Transplantation_day_diffs=distance_trans_rej), aes(x= as.numeric(Transplantation_day_diffs)),color= "#BC3C29FF")
+  }
+  return(plot)
+  
+}
+
+(plot_alpha_timcourse("diversity_shannon", rug=T)+ ylab("Shannon Index"))/ (plot_alpha_timcourse("evenness_simpson", rug=T)+ ylab("Simpson Evenness")+ theme(legend.position="none"))/(plot_alpha_timcourse("observed", rug=T)+ ylab("Observed OTUs") + theme(legend.position = "none") )
+
+ggsave("../plots/Figure2/timecourse_shn_simp_observ_rug.pdf", height=7, width = 5.5)
+
+
+
+
+(plot_alpha_timcourse("diversity_shannon")+ ylab("Shannon Index"))  +
+
+```
+
+
+```{r}
+#complete.recipient.alphas$distance_trans_rej 
+
+
+
+
+ggplot(complete.recipient.alphas%>% filter(Transplantation_day_diffs <= 1000) %>% mutate(rej=case_when(rej==0 ~ "Non Rejection", T ~"Rejection")) ) +
+geom_smooth(aes(y=diversity_shannon, x=Transplantation_day_diffs, color=rej, fill=rej), alpha=0.2) +
+geom_rug(data=complete.recipient.alphas %>% filter(rej==1 & distance_trans_rej <=1000) %>% distinct(PatientID, Transplantation_day_diffs=distance_trans_rej), aes(x= as.numeric(Transplantation_day_diffs)),color= "#BC3C29FF") +
+scale_fill_manual(values=c( "#0072B5FF","#BC3C29FF")) + scale_color_manual( values=c( "#0072B5FF","#BC3C29FF"))  + theme_classic() + 
+  theme(
+  strip.text = element_text(size=11),
+strip.background = element_blank(),
+ strip.placement = "outside", # panel.border = element_rect(colour = "black"),
+ # strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=11),
+    axis.title.y  =element_text(size=11),
+    legend.title = element_blank(),
+    legend.position="top" )+ xlab("Distance to KT in days") + ylab("Shannon Index")
+  
+  
+  
+#geom_density(data=complete.recipient.alphas %>% filter(rej==1 & distance_trans_rej <=1000) %>% distinct(PatientID, Transplantation_day_diffs=distance_trans_rej), aes(x= as.numeric(Transplantation_day_diffs), y = ((..density.. )+0.01) * 250 ))+scale_y_continuous(name = "Number of transactions", limits = c(1.5,4.5), sec.axis = sec_axis(~(.x -0.01) / 250,    name = "Density"  ) ) 
+ 
+
+
+
+```
+
+
+
+
+
+
+
+
+#### Event Day distance
+```{r}
+(ggplot(complete.recipient.alphas%>% filter( rej== 1 & Event_day_diffs >= -500 & Event_day_diffs <= 500), aes(y=observed, x=Event_day_diffs)) +
+geom_smooth(alpha=0.2, color= "#BC3C29FF", fill="#BC3C29FF")   + theme_classic() + 
+  theme(
+  strip.text = element_text(size=10),
+strip.background = element_blank(),
+ strip.placement = "outside", # panel.border = element_rect(colour = "black"),
+ # strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=10),
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+    legend.title = element_blank(),
+    legend.position="top" )+ xlab("Distance to Rejection Event in days") + ylab("Number of Observed OTUs"))/
+(ggplot(complete.recipient.alphas%>% filter( rej== 1 & Event_day_diffs >= -500 & Event_day_diffs <= 500), aes(y=diversity_shannon, x=Event_day_diffs)) +
+geom_smooth(alpha=0.2, color= "#BC3C29FF",fill="#BC3C29FF")   + theme_classic() +
+  theme(
+  strip.text = element_text(size=10),
+strip.background = element_blank(),
+ strip.placement = "outside", # panel.border = element_rect(colour = "black"),
+ # strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=10),
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+    legend.title = element_blank(),
+    legend.position="top" )+ xlab("Distance to Rejection Event in days")  + ylab("Shannon Index"))/
+(ggplot(complete.recipient.alphas%>% filter( rej== 1 & Event_day_diffs >= -500 & Event_day_diffs <= 500), aes(y=evenness_simpson, x=Event_day_diffs)) +
+geom_smooth(alpha=0.2, color= "#BC3C29FF",fill="#BC3C29FF") + theme_classic() + 
+  theme(
+  strip.text = element_text(size=10),
+strip.background = element_blank(),
+ strip.placement = "outside", # panel.border = element_rect(colour = "black"),
+ # strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=10),
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+    legend.title = element_blank(),
+    legend.position="top" )+ xlab("Distance to Rejection Event in days") + ylab("Simpson Evenness"))
+
+ggsave("../plots/Figure2/timecourse_shn_simp_observ_EventDayDiffs.pdf", height=6, width = 4)
+
+```
+
+
+
+
+
+
+
+###8.2.4 Beta Diversity
+
+```{r}
+pseudo_bray_ordination <- ordinate(subset_samples( physeq, origin=="Empfänger" & Transplantation_day_diffs >0), method="PCoA", distance="bray")
+
+permanova_pseudolong<- vegan::adonis2(phyloseq::distance(subset_samples( physeq, origin=="Empfänger" & Transplantation_day_diffs >0), method="bray") ~ rej, 
+        as(sample_data(subset_samples( physeq, origin=="Empfänger" & Transplantation_day_diffs >0)), "data.frame"))
+
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_pseudolong$F[1],2)), paste0("p-value: ",  permanova_pseudolong$`Pr(>F)`[1]   )), collapse="\n")
+
+permanova_text
+
+plot_physeq <- physeq
+sample_data(plot_physeq) <- data.frame(sample_data(plot_physeq)) %>% mutate(group= factor(case_when(rej==0 ~ "Non Rejection", Event_day_diffs <= 3 ~ "Before Rejection", T ~ "After Rejection"),levels = c("Non Rejection", "Rejection", "Before Rejection", "After Rejection") ))
+
+
+
+
+```
+####8.2.4.1 PCoA with split rej
+
+```{r}
+centroid_data <- right_join(rbind(complete.recipient.alphas,rejector.alphas),
+                            as.data.frame(pseudo_bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+by="SampleID") %>% filter(group!="out") %>%
+  group_by(group) %>%
+  summarise(centroid_x = mean(Axis.1), centroid_y = mean(Axis.2))
+
+plot_ordination(
+ subset_samples( plot_physeq, origin=="Empfänger" & Transplantation_day_diffs >0),
+  pseudo_bray_ordination,
+ color="group"
+) +
+  theme_classic() +
+  theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+  annotate("text", size = 3.2, y = -0.35, x = -1, label = permanova_text, hjust = 0) +
+  stat_ellipse( data = right_join(rbind(complete.recipient.alphas,rejector.alphas),
+                            as.data.frame(pseudo_bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+by="SampleID") %>% filter(group!="out"), aes(color=group),show.legend = F) + # Add ellipses
+  # Add centroids
+  geom_point(data = centroid_data, aes(x = centroid_x, y = centroid_y, fill=group), color="black", size = 5, shape=22, show.legend = F) + 
+  scale_color_manual(breaks= c("Non Rejection", "Rejection", "Before Rejection", "After Rejection"), values = c( "Non Rejection" = "#0072B5FF", "Rejection" = "#BC3C29FF", "Before Rejection" ="Pale Violet Red 2" , "After Rejection" = "#8d3d75"))  +
+   scale_fill_manual(breaks= c("Non Rejection", "Rejection", "Before Rejection", "After Rejection"), values = c( "Non Rejection" = "#0072B5FF", "Rejection" = "#BC3C29FF", "Before Rejection" ="Pale Violet Red 2" , "After Rejection" = "#8d3d75"))  
+
+
+ggsave("../plots/Figure2/beta_all_nonrej_split_rej.pdf", height=4, width = 6.5)
+
+```
+
+####8.2.42 PCoA: All Rej 
+```{r}
+centroid_data <- right_join(complete.recipient.alphas,
+                            as.data.frame(pseudo_bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+by="SampleID")  %>%
+  group_by(rej) %>%
+  summarise(centroid_x = mean(Axis.1), centroid_y = mean(Axis.2))
+
+plot_ordination(
+ subset_samples( plot_physeq, origin=="Empfänger" & Transplantation_day_diffs >0),
+  pseudo_bray_ordination,
+ color="rej"
+) +
+  theme_bw() +
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+  annotate("text", size = 3.2, y = -0.35, x = -0.7, label = permanova_text, hjust = 0) +
+  stat_ellipse() + # Add ellipses
+  # Add centroids
+  geom_point(data = centroid_data, aes(x = centroid_x, y = centroid_y,fill=rej),color="black", size = 5, shape=22, show.legend = F) + 
+  scale_fill_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" ))+ # "#BC3C29FF"+
+  scale_color_manual(labels=c("0"= "Non Rejection", "1"= "Rejection"), values = c( "0" = "#0072B5FF", "1" = "#BC3C29FF" )) # "#BC3C29FF"
+
+ggsave("../plots/Figure2/beta_all_nonrej_rej.pdf", height=4, width = 6.5)
+
+```
+
+#9.Without MMF stopper
+
+##9.1 Alpha Diversity
+```{r}
+
+not_rar_alphas %>% filter(SampleID %in% in_samples & !PatientID %in% mmf_stoppers)%>% mutate(rej=case_when(rej==0 ~ "Non Rejection", T~ "Rejection")) %>% select(rej, observed, diversity_shannon,evenness_simpson) %>% gather("metric", "value", observed, diversity_shannon,evenness_simpson ) %>% mutate(metric=factor(metric, levels=c( "observed", "diversity_shannon","evenness_simpson"))) %>%
+  
+  ggplot(aes(x=rej,y=value, fill=rej)) + 
+    scale_fill_manual(breaks=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))+
+    geom_boxplot(color="black") +
+ geom_jitter(widht=0.2,size=1.8) + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=5,label.x.npc = "center", label= "p.format" ) +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=15),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) + 
+  facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("observed" = "observed OTUs",
+      "diversity_shannon" = "Shannon Index",
+     "evenness_simpson"= "Simpson Evenness") )) 
+  
+
+
+ggsave("../plots/Figure3/MMF/MMF_alphas_obser_shn_simp_boxplots.pdf",height=5, width=9)
+
+```
+
+##9.2. Beta diversity
+
+```{r}
+permanova_mmf <- adonis2(phyloseq::distance(subset_samples(reduced_cohort2_physeq, ! PatientID %in% mmf_stoppers)
+, method="bray") ~ rej, as(sample_data(reduced_cohort2_physeq), "data.frame") %>% filter(!PatientID %in% mmf_stoppers))
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_mmf$F[1],2)), paste0("p-value: ",  permanova_mmf$`Pr(>F)`[1]   )), collapse="\n")
+                  
+
+
+bray_ordination_mmf <- ordinate(subset_samples(reduced_cohort2_physeq, ! PatientID %in% mmf_stoppers), method="PCoA", distance="bray")
+```
+
+
+```{r}
+#c2_beta_plot <- 
+plot_ordination(subset_samples(reduced_cohort2_physeq, ! PatientID %in% mmf_stoppers), bray_ordination_mmf, color="rej") +   
+  geom_point(size=2.3, aes(color=rej)) +
+   theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=10),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) +   annotate(geom="text", x=0.83, y=-0.35, label= permanova_text, size=3.1,  hjust = 0 ) +
+
+  stat_ellipse() + # Add ellipses
+
+  # Add centroids
+  geom_point(data = create_centroid_data(bray_ordination_mmf, basic.info, "rej"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=rej), size = 5, shape=22, color="black") +
+  scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))+
+  scale_color_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))
+
+ggsave("../plots/Figure3/MMF/MMF_beta.pdf", width=5.5, height=4)
+```
+
+## 9.3 PCoA: MMF, Basil 
+```{r}
+no_basil_patients <- initial_immunosuppression_table %>% filter(initial_Basiliximab =="no" ) %>% pull(PatientID)
+mmf_stoppers
+intersect(mmf_stoppers, no_basil_patients)
+
+sample_data(reduced_cohort2_physeq) <- data.frame(sample_data(reduced_cohort2_physeq)) %>% mutate(drug_grp= case_when(
+  PatientID %in% intersect(mmf_stoppers, no_basil_patients) ~ "MMF stop & no Basil", 
+  PatientID %in% setdiff(mmf_stoppers,no_basil_patients) ~ "MMF stop",
+  PatientID %in% setdiff(no_basil_patients, mmf_stoppers) ~ "No Basil",
+  rej==0 ~ "Non  Rejection", 
+  rej==1 & !PatientID %in% union(mmf_stoppers, no_basil_patients) ~ "MMF & Basil"
+
+  
+  )) %>% mutate(initBasil= case_when(PatientID %in% no_basil_patients ~  "no initial", T ~"initial"), MMFstoppers= case_when(PatientID %in% mmf_stoppers ~  "stop", T ~"no stop"))
+```
+
+```{r}
+bray_ordination_drg_grp <- ordinate(subset_samples(reduced_cohort2_physeq, rej==1), method="PCoA", distance="bray")
+bray_ordination_drg_grp <- ordinate(subset_samples(reduced_cohort2_physeq, rej==1), method="PCoA", distance="bray")
+
+
+permanova_basil_mmf <- vegan::adonis2(phyloseq::distance(subset_samples(reduced_cohort2_physeq, rej==1)
+, method="bray") ~ drug_grp, as(sample_data(subset_samples(reduced_cohort2_physeq, rej==1)), "data.frame"))
+
+permanova_basil <- vegan::adonis2(phyloseq::distance(subset_samples(reduced_cohort2_physeq, rej==1)
+, method="bray") ~ initBasil, as(sample_data(subset_samples(reduced_cohort2_physeq, rej==1)), "data.frame"))
+
+permanova_mmf <- vegan::adonis2(phyloseq::distance(subset_samples(reduced_cohort2_physeq, rej==1)
+, method="bray") ~ MMFstoppers, as(sample_data(subset_samples(reduced_cohort2_physeq, rej==1)), "data.frame"))
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_basil$F[1],2)), paste0("p-value: ",  permanova_basil$`Pr(>F)`[1]   )), collapse="\n")
+          
+```
+
+### Basillixamb Comparison
+```{r}
+plot_ordination(subset_samples(reduced_cohort2_physeq, rej==1), bray_ordination_drg_grp, color="initBasil") +   
+  geom_point(size=2.3, aes(color=initBasil)) +
+   theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=10),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )+
+  stat_ellipse() + # Add ellipses
+ annotate(geom="text", x=-1.2, y=0.39, label= permanova_text, size=3.1,  hjust = 0 ) +
+
+  # Add centroids
+  geom_point(data = create_centroid_data(bray_ordination_drg_grp, data.frame(sample_data(subset_samples(reduced_cohort2_physeq, rej==1))), "initBasil"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=initBasil), size = 5, shape=22, color="black") +
+scale_fill_manual(na.translate = F, labels=c("Initial Basil.", "No Initial Basil."), values=c( "darkorange4","darkorange"))+
+scale_color_manual(na.translate = F, labels=c("Initial Basil.", "No Initial Basil."), values=c( "darkorange4","darkorange"))
+
+ggsave("../plots/Figure3/within_rejection_basil_beta.pdf", width=5.5, height=4.5)
+
+```
+### MMF comparison 
+```{r}
+plot_ordination(subset_samples(reduced_cohort2_physeq, rej==1), bray_ordination_drg_grp, color="MMFstoppers") +   
+  geom_point(size=2.3, aes(color=MMFstoppers)) +
+   theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=10),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )+
+  stat_ellipse() + # Add ellipses
+ annotate(geom="text", x=-1.2, y=0.45, label= paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_mmf$F[1],2)), paste0("p-value: ",  permanova_mmf$`Pr(>F)`[1]   )), collapse="\n"), size=3.1,  hjust = 0 ) +
+
+  # Add centroids
+  geom_point(data = create_centroid_data(bray_ordination_drg_grp, data.frame(sample_data(subset_samples(reduced_cohort2_physeq, rej==1))), "MMFstoppers"), aes(x = centroid_x_mean, y = centroid_y_mean, fill=MMFstoppers), size = 5, shape=22, color="black") +
+scale_fill_manual(na.translate = F, labels=c( "constant MFF","MMF stop"), values=c(  "yellowgreen","darkgreen"))+
+scale_color_manual(na.translate = F, labels=c( "constant MFF","MMF stop"), values=c( "yellowgreen","darkgreen"))
+
+ggsave("../plots/Figure3/within_rejection_mmf_beta.pdf", width=5.5, height=4)
+
+```
+
+
+
+#10. Longitudinal post Event
+
+## 10.1 Get Patient/SampleIDs
+```{r}
+
+rej_postevent <- basic.info %>% filter(PatientID %in% in_patients  & Event_day_diffs >=90 & Event_day_diffs <=1000) %>% group_by(PatientID) %>% slice_min(Event_day_diffs) %>% mutate(BefSample_Sample_diffs=Event_day_diffs) %>% select(PatientID, SampleID)
+
+control_postevent <- basic.info %>% filter(PatientID %in% in_patients & rej==0) %>%  group_by(PatientID) %>% mutate(BefSample_Sample_diffs=  Date- Date[timepoint=="V1"], .before=Event_day_diffs) %>% filter(BefSample_Sample_diffs >= 90 & BefSample_Sample_diffs <=1000) %>%  slice_min(BefSample_Sample_diffs) %>% select(PatientID, SampleID)
+
+#control_postevent<- newlist %>% filter( rej==0 & PatientID %in% in_patients)  %>% filter((Select_neu==3)) %>% left_join(non_rej_c2_sample_dates, by="PatientID") %>% mutate(Event_day_diffs = Sample_Date - C2_Sample_Date) %>% select(PatientID, SampleID, Event_day_diffs, C2_Sample_Date) %>% filter(Event_day_diffs >= 90 & Event_day_diffs <= 500) %>% group_by(PatientID) %>% slice_max(Event_day_diffs) %>% select(PatientID, SampleID)
+
+postEvent_samples <- basic.info %>% filter(SampleID %in% c(rej_postevent$SampleID,control_postevent$SampleID)  | (PatientID %in% c(rej_postevent$PatientID,control_postevent$PatientID) & SampleID %in% in_samples)) %>% mutate(grp= case_when(SampleID %in%rej_postevent$SampleID ~ "Post\nRejection", SampleID %in% control_postevent$SampleID ~ "Non Rejection\nSample 2", SampleID %in% in_samples & rej==0 ~ "Non Rejection\nSample 1", T ~ "Pre\nRejection")) %>% mutate(grp = factor(grp, levels=c("Non Rejection\nSample 1","Non Rejection\nSample 2", "Pre\nRejection", "Post\nRejection")))
+
+table(postEvent_samples$grp)
+
+
+setdiff(rej_postevent$SampleID, rejgrp_samples)
+```
+## 10.2 Alpha Diversity
+
+```{r}
+# 
+not_rar_alphas  %>% filter(SampleID %in% postEvent_samples$SampleID) %>% left_join(select(postEvent_samples, SampleID,grp), by="SampleID")  %>%  select(PatientID, grp, observed, diversity_shannon,evenness_simpson)%>% arrange(PatientID,grp) %>% gather("metric", "value", observed, diversity_shannon,evenness_simpson ) %>% mutate(metric=factor(metric, levels=c( "observed", "diversity_shannon","evenness_simpson"))) %>%
+  
+  ggplot(aes(x=grp,y=value, fill=grp)) + 
+    scale_fill_manual( values=c( "#0072B5FF", "darkblue","#BC3C29FF", "#8d3d75"))+
+    geom_boxplot(color="black") +
+   geom_line(aes(group = PatientID), linetype="dotted")+
+ geom_point(size=1.8) + theme(legend.position = "none") +
+  xlab("")  + ylab("") + 
+  stat_compare_means(size=3,label.x.npc = "center", comparisons=list(c("Non Rejection\nSample 1","Non Rejection\nSample 2"), c("Pre\nRejection", "Post\nRejection")),label= "p.format", paired=T) +
+  theme_classic() + 
+   theme(
+    strip.text = element_text(size=12),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) + 
+  facet_wrap(~metric, nrow=1, scales="free_y", labeller = labeller(metric = 
+    c("observed" = "observed OTUs",
+      "diversity_shannon" = "Shannon Index",
+     "evenness_simpson"= "Simpson Evenness") )) 
+  
+ggsave("../plots/Figure5/postEvent_alpha_90_1000d_longdash.pdf", width=12.5, height=5.5)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+##10.3 Beta Diversity 
+```{r}
+postEvent_physeq <- subset_samples( physeq, rownames(sample_data(physeq)) %in% postEvent_samples$SampleID)
+sample_data(postEvent_physeq) <- postEvent_samples
+
+postevent_bray_ordination <- ordinate(postEvent_physeq, method="PCoA", distance="bray")
+
+permanova_postevent<- vegan::adonis2(phyloseq::distance(postEvent_physeq, method="bray") ~ grp, 
+        postEvent_samples)
+
+
+permanova_text <- paste(c("PERMANOVA", paste0("pseudo-F: ", round(permanova_postevent$F[1],2)), paste0("p-value: ",  permanova_postevent$`Pr(>F)`[1]   )), collapse="\n")
+
+permanova_text
+
+
+```
+
+```{r}
+centroid_data <-  right_join(postEvent_samples,  as.data.frame(postevent_bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+by="SampleID")  %>%
+  group_by(grp) %>%
+  summarise(centroid_x = mean(Axis.1), centroid_y = mean(Axis.2))
+
+plot_ordination(postEvent_physeq,
+  postevent_bray_ordination,
+ color="grp"
+) +  geom_point(size=2)+
+  theme_classic() +
+  theme(
+    axis.line = element_line(colour = "black"),
+    axis.ticks.y = element_line(color = "black"),
+    axis.text.y = element_text(color = "black", size = 10),
+    axis.text.x = element_text(color = "black", size = 10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10),
+    panel.border = element_blank(),
+    panel.background = element_blank()
+  ) +
+    geom_line(data= right_join(postEvent_samples,  as.data.frame(postevent_bray_ordination$vectors) %>% rownames_to_column("SampleID"), 
+by="SampleID"), aes(group = PatientID,color=rej),  linetype="longdash")+
+  annotate("text", size = 3.2, y = 0.45, x = -0.7, label = permanova_text, hjust = 0) +
+  stat_ellipse() + # Add ellipses
+  # Add centroids
+  geom_point(data = centroid_data, aes(x = centroid_x, y = centroid_y,fill=grp),color="black", size = 5, shape=22, show.legend = F) + 
+  scale_fill_manual( values=c( "#0072B5FF", "darkblue","#BC3C29FF", "#8d3d75"))+
+  scale_color_manual( values=c( "#0072B5FF", "darkblue","#BC3C29FF", "#8d3d75"))
+
+ ggsave("../plots/Figure5/postEvent_beta_90_1000d_longdash.pdf", width=8, height=4.5)
+
+```

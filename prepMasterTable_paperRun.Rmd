@@ -1,0 +1,863 @@
+---
+title: "Preparation Master Table & metadeconfoundR run"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#1. Master Table Preparation 
+
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+
+in the following basic.info will be extended by more variables: primary condition, infections,....
+
+##1.1 Adding Covariates
+
+###1.1.1 Baseline Variables
+```{r}
+## adding more baseline variables
+
+extended.basic.info <- basic.info %>% full_join(.,baseline.table %>% select(PatientID,Site, starts_with("BMI"), starts_with("height"), starts_with("weight"), primConditionTx.kidney,ICDcode1,bloodAB0,typeOfTx, ebv, ebv.donor, cmv ,cmv.donor), by="PatientID")
+
+
+## calculating BMI 
+
+extended.basic.info %>% filter(SampleID %in% cohort2_Ids) %>% group_by(rej) %>% summarise(mean(BMI))
+
+
+### primary condition defined by Felix B. 
+extended.basic.info <- read.csv2("../tables/baseline_variables_FB_primary_condition.tsv", sep="\t") %>% select(PatientID, primary.kidney.condition) %>% full_join(extended.basic.info,., by="PatientID") %>% relocate(primary.kidney.condition, .before=ICDcode1)
+
+## adding primary condition for whole cohort 
+baseline_notC2_primary_condition_FB <- read_delim("../tables/baseline_notC2_primary_condition_FB.csv", delim = ";", escape_double = FALSE, na = "NA", trim_ws = TRUE) %>% select(PatientID, `primary kidney condition`)
+
+extended.basic.info<- extended.basic.info %>% left_join(baseline_notC2_primary_condition_FB , by="PatientID") %>% mutate(primary.kidney.condition = case_when(is.na(primary.kidney.condition) ~ `primary kidney condition`, T ~ primary.kidney.condition)) %>% select(-`primary kidney condition`)
+```
+
+###1.1.2 Antibiotic Treatment
+```{r}
+#bac_infections %>% filter(!is.na(Antibac_Date) & !is.na(AntibacName)) %>% select(PatientID, routeOfAdminstrationAntibac, Antibac_Date, AntibacName, antibiotic.class) %>% distinct()
+
+transformed_bac_infections %>% mutate(Antibac_Date= case_when(is.na(Antibac_Date) &  !is.na(diagDate_bacInfect) ~ diagDate_bacInfect, T ~ Antibac_Date )) %>%
+              filter(!is.na(Antibac_Date) & !is.na(AntibacName)) %>% 
+              select(PatientID, routeOfAdminstrationAntibac, Antibac_Date, AntibacName, antibiotic.class)
+
+```
+
+
+```{r}
+extended.basic.info <- extended.basic.info %>%
+  ## adding bac infection 
+  left_join(transformed_bac_infections %>% 
+              mutate(Antibac_Date= case_when(is.na(Antibac_Date) &  !is.na(diagDate_bacInfect) ~ diagDate_bacInfect, T ~ Antibac_Date )) %>%
+              filter(!is.na(Antibac_Date) & !is.na(AntibacName)) %>% 
+              select(PatientID, routeOfAdminstrationAntibac, Antibac_Date, AntibacName, antibiotic.class),
+            by = "PatientID") %>%
+  
+  ### "" of 	routeOfAdminstrationAntibac to NAs
+  mutate(	routeOfAdminstrationAntibac = case_when(routeOfAdminstrationAntibac == "" ~ NA, T ~routeOfAdminstrationAntibac )) %>%
+  
+  ## calculating distance from sample to antibiotic treatment
+  mutate(AntiBac_Sample_Distance= Antibac_Date - Date) %>% 
+  ## if antibiotic after sample, then delete info -> NAs or if antibiotic is taken before tx and sample taken after tx
+  
+  mutate_at(
+    .vars = vars("routeOfAdminstrationAntibac", "AntibacName", "antibiotic.class"),
+    .funs = list(~case_when((AntiBac_Sample_Distance >0 | (!bef_after_transplantation & (Antibac_Date < Transplantation_Date)))  ~ NA_character_,TRUE ~ .))
+  ) %>%
+mutate(AntiBac_Sample_Distance = case_when((AntiBac_Sample_Distance >0  | (!bef_after_transplantation & (Antibac_Date < Transplantation_Date)) ) ~ NA, T ~ AntiBac_Sample_Distance))%>% 
+  mutate(Antibac_Date= case_when( (AntiBac_Sample_Distance >0 | is.na(AntiBac_Sample_Distance)| (!bef_after_transplantation & (Antibac_Date < Transplantation_Date)))  ~as.Date(NA) , T ~ Antibac_Date)) %>% 
+  ## now group by sample, delete all empty rows if the sample has at least one row with an antibiotic usage
+   distinct() %>%  group_by(SampleID) %>%  
+  filter(!(is.na(routeOfAdminstrationAntibac) & is.na(AntibacName) & is.na(antibiotic.class) & is.na(AntiBac_Sample_Distance) &is.na(Antibac_Date)
+     & sum(!is.na(routeOfAdminstrationAntibac) & !is.na(AntibacName) & !is.na(antibiotic.class) & !is.na(AntiBac_Sample_Distance) & !is.na(Antibac_Date)) >0) ) %>% 
+### finally making it wide, numbering antibiotics 
+  mutate(row = row_number()) %>%
+  tidyr::pivot_wider(names_from = row, values_from = c(routeOfAdminstrationAntibac, Antibac_Date, AntibacName, antibiotic.class,AntiBac_Sample_Distance))
+```
+
+#### Basic Assessment
+```{r}
+## one patient with 18 antibiotics before sample was taken 
+
+## 10 samples with antibiotic usage within 30 days before taken the sample 
+extended.basic.info %>% filter( SampleID %in% in_samples & if_any(starts_with("AntiBac_Sample_Distance"), function(x){x >= -30} )) 
+extended.basic.info %>% filter( SampleID %in% in_samples & if_any(starts_with("AntiBac_Sample_Distance"), function(x){x >= -30} )) %>% group_by(rej) %>% summarise(n())
+  
+
+## 21 samples with usage before taken the sample 
+extended.basic.info %>% filter( SampleID %in% in_samples & if_any(starts_with("AntiBac_Sample_Distance"), function(x){!is.na(x)} ))  
+
+extended.basic.info %>% filter( SampleID %in% in_samples & if_any(starts_with("AntiBac_Sample_Distance"), function(x){!is.na(x)} )) %>% group_by(rej) %>% summarise(n())
+```
+
+#### Creating Variables
+
+```{r}
+### add antibitotic variables 
+
+## binary: given antibiotics before sample, within 30 days before sample 
+extended.basic.info <- extended.basic.info %>% mutate(antibac_before_sample = case_when(if_any(.cols=starts_with("AntiBac_Sample_Distance"),.fns=  ~  !is.na(.)) ~ "yes", T ~ "no"),  
+                                                      antibac_before_30d_sample = case_when(if_any(.cols=starts_with("AntiBac_Sample_Distance"),.fns=  ~  . >= -30)  ~ "yes", T ~ "no"),
+                                                      .after= typeOfTx )
+
+## binary parenteral before sample, within 30 days before sample 
+extended.basic.info<- extended.basic.info %>% mutate(IV_before_sample = case_when(if_any(.cols=starts_with("routeOfAdminstrationAntibac"),.fns=  ~  . == "parenteral") ~ "yes", T ~ "no"),  
+                                                      .after= antibac_before_30d_sample )
+
+
+ table( extended.basic.info %>% filter(SampleID %in% cohort2_Ids) %>% pull(rej),  extended.basic.info %>% filter(SampleID %in% cohort2_Ids) %>%pull(antibac_before_sample))
+ 
+## number of total number of antibiotics 
+ 
+num_AntibacName <- extended.basic.info %>% rename(shortID=name) %>%  pivot_longer(cols = starts_with("AntibacName"), values_drop_na = F) %>% group_by(SampleID) %>% 
+  summarise( distinct_AntibacName= n_distinct(value, na.rm=T), total_AntibacName= length((na.omit(value) ) ))
+
+
+num_antibioticclass <- extended.basic.info %>% rename(shortID=name) %>%  pivot_longer(cols = starts_with("antibiotic.class"), values_drop_na = F) %>% group_by(SampleID) %>% 
+  summarise( distinct_antibioclass= n_distinct(value, na.rm=T), total_antibioclass= length((na.omit(value) ) ))
+
+
+extended.basic.info<- extended.basic.info %>% left_join(num_AntibacName, by="SampleID") %>% left_join(num_antibioticclass, by="SampleID") %>% relocate(starts_with("total"), starts_with("distinct"), .after=IV_before_sample)
+
+
+## 30 days separation 
+subset_30d <- extended.basic.info %>% select(SampleID, matches("\\_[1-9]$|\\_1[0-8]$")) %>% mutate_all(as.character) %>% pivot_longer(-SampleID, values_drop_na=T) %>% separate(name, into=c("name", "num"), sep="_(?=\\d+$)")  %>% 
+  pivot_wider(names_from=name, values_from=value) %>% filter(as.numeric(AntiBac_Sample_Distance) >= -30)
+
+
+numbers_30d <- subset_30d  %>% group_by(SampleID) %>% summarise(
+    IV_30d_before_sample= any(routeOfAdminstrationAntibac == "parenteral") ,
+    total_antibioclass_30d = length(na.omit(antibiotic.class)), total_AntibacName_30d = length(na.omit(AntibacName)) ,
+    distinct_antibioclass_30d = n_distinct(antibiotic.class,na.rm=T), distinct_AntibacName_30d = n_distinct(AntibacName, na.rm=T) )
+
+numbers_30d
+
+subset_30d<- subset_30d %>% select(-num) %>% mutate(row =  paste( "30d_",row_number())) %>%  
+  tidyr::pivot_wider(names_from = row, values_from = c(routeOfAdminstrationAntibac, Antibac_Date, AntibacName, antibiotic.class,AntiBac_Sample_Distance))
+
+
+## adding it to extended basic info 
+
+extended.basic.info<- left_join( extended.basic.info,numbers_30d, by="SampleID") %>% left_join(.,subset_30d,by="SampleID") %>% relocate( starts_with("IV"), starts_with("total"), starts_with("distinct"), .after = "typeOfTx")
+
+## modify some variables 
+
+extended.basic.info<- extended.basic.info %>% mutate(IV_30d_before_sample = case_when(is.na(IV_30d_before_sample) ~ "no", IV_30d_before_sample ==T ~ "yes", T ~ "no"))
+
+extended.basic.info<- extended.basic.info %>% mutate_at(vars(ends_with("_30d")), ~ ifelse(is.na(.x),0,.x))
+
+table(extended.basic.info %>% filter(SampleID %in% in_samples) %>% pull(rej), extended.basic.info %>% filter(SampleID %in% in_samples) %>% pull( IV_30d_before_sample))
+table(extended.basic.info %>% filter(SampleID %in% in_samples) %>% pull(rej), extended.basic.info %>% filter(SampleID %in% in_samples) %>% pull( IV_before_sample))
+```
+
+
+#### Plot Antibiotic for C2
+```{r}
+
+#antibiotic_usage_plot <- 
+extended.basic.info %>% filter(SampleID %in% in_samples) %>% select(PatientID, SampleID, rej, total_antibioclass, distinct_antibioclass) %>% arrange(PatientID) %>% gather("type", "number",total_antibioclass, distinct_antibioclass )%>% 
+  mutate(rej=case_when(rej== 0 ~ "Non Rejection", T ~ "Rejection")) %>% 
+  ggplot(aes(x=rej, y= number, fill=rej)) + geom_boxplot() +
+   facet_wrap(~type, labeller=labeller(type=c("total_antibioclass"= "Number of total antibiotics\ntaken before sample", "distinct_antibioclass"="Number of distinct antibiotics\ntaken before sample"))) + 
+  stat_compare_means(label.x.npc = "center", size=3.3 , method= "wilcox.test") + xlab("") + ylab("")  + theme_bw() +
+ theme(
+   strip.text = element_text(size=12),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+    legend.title = element_blank(),
+    legend.position="none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) + scale_fill_manual(breaks=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF"))
+
+
+#ggsave("../plots/cohort2/description/latex_antibiotic_usage.pdf", antibiotic_usage_plot, width=7, height=4)
+
+
+```
+
+
+### 1.1.3 Lab Values
+
+lab values closest to sample
+```{r}
+extended.basic.info<- match.Laboratory %>% select(SampleID, Ascertainment_Date, Lab_Sample_Distance, Ascertainment_Tx_diffs,
+Ascertainment_Event_diffs, Albumin:last_col()) %>% full_join(extended.basic.info,.,by="SampleID")
+```
+
+####1.1.3.1 Creatinine
+##### Minimum Creatinine
+```{r}
+min_Creatinine_vals <-subset_lab %>% select(PatientID, Ascertainment_Tx_diffs, Ascertainment_Event_diffs, rej, starts_with("Crea"),Ascertainment_Date)  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID), by="PatientID") %>% mutate(Ascertainment_Sample_diffs = Ascertainment_Date - SampleDate ) %>% filter(Ascertainment_Sample_diffs <= 0 &   Ascertainment_Tx_diffs > 0) %>% group_by(SampleID) %>%  slice_min(CreatinineFinal) %>% distinct(SampleID, MinCreatinine=CreatinineFinal,rej,Ascertainment_Sample_diffs,Ascertainment_Event_diffs,Ascertainment_Tx_diffs)
+
+
+min_crea_plot <- min_Creatinine_vals %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples) & SampleID != "T024769_S169") %>% distinct(SampleID,rej,MinCreatinine)  %>% mutate(rej= case_when(rej == 0 ~ "Non Rejection", T ~ "Rejection")) %>% ggplot( aes(x=rej, y=MinCreatinine,fill=rej)) + geom_boxplot() + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5) + ylab("Minimum Creatinine before Sample") + xlab("")  +  scale_fill_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+   # axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=11),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )
+
+#ggsave("../plots/cohort2/description/removed_c2_min_creatinine.pdf", min_crea_plot, width=6, height=3.8)
+
+extended.basic.info<- extended.basic.info %>% left_join(., min_Creatinine_vals %>% select(SampleID, MinCreatinine), by="SampleID") %>% relocate(MinCreatinine, .before="BMI")
+
+```
+
+##### All Creatinine Values
+
+```{r}
+## adding all creatinine values 
+extended.basic.info<- extended.basic.info %>% full_join(allCreatinine_c2, by="SampleID")
+
+extended.basic.info<- extended.basic.info %>% relocate(starts_with("Ascertainment"), starts_with("Creatinine_"),.after = last_col()) %>% relocate(Creatinine_Critical, .after=CreatinineFinal)
+```
+
+##### Mean, Min, Max Creatinine Values
+
+```{r}
+## adding mean creatine values for c2
+
+extended.basic.info<- extended.basic.info %>% full_join(mean_creatinine_c2 %>% select(-rej), by="SampleID") %>% relocate(ends_with("_crea"), .before=BMI)
+
+
+min_Creatinine_vals %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples) ) %>% distinct(SampleID,rej,MinCreatinine) %>% filter(MinCreatinine >2.5 & rej==0)
+
+tapply(min_Creatinine_vals %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples) &SampleID !="T024769_S169" ) %>% pull(MinCreatinine), 
+       min_Creatinine_vals %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples) &SampleID !="T024769_S169" ) %>% pull(rej), 
+      summary )
+```
+
+##### Crea Plots
+```{r}
+## total min value
+
+ggsave( "../plots/cohort2/description/c2_min_creatinine_postKT.pdf", extended.basic.info %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples)) %>% mutate(TotalMinCrea= min(min_before_sample_crea, min_after_sample_crea, na.rm=T)) %>% select(SampleID, PatientID, rej,TotalMinCrea, min_before_sample_crea, min_after_sample_crea, MinCreatinine)%>% arrange(PatientID) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection")) %>% ggplot( aes(x=rej, y=TotalMinCrea,fill=rej)) + geom_boxplot() + stat_compare_means(size=4.5,label.x.npc = "center", hjust=0.5) + ylab("Minimum Creatinine after KT") + xlab("")  +  scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ),width=6, height=3.8)
+
+
+ggsave( "../plots/cohort2/description/MinCrea_all_timespans.pdf", extended.basic.info %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples)) %>% mutate(TotalMinCrea= min(min_before_sample_crea, min_after_sample_crea, na.rm=T)) %>% select(SampleID, PatientID, rej,TotalMinCrea, min_before_sample_crea, min_after_sample_crea)%>% arrange(PatientID) %>% mutate(rej= case_when(rej == 0 ~ "Normal Progress", T ~ "Rejection")) %>% gather("time_frame", "crea", TotalMinCrea, min_before_sample_crea,min_after_sample_crea)%>% mutate(time_frame=factor(time_frame, levels=c("TotalMinCrea", "min_before_sample_crea","min_after_sample_crea"))) %>% ggplot( aes(x=rej, y=crea,fill=rej)) + geom_boxplot() + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5) + ylab("Minimum Creatinine") + xlab("")  +  scale_fill_manual(na.translate = F, labels=c("Normal Progress", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=11),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=13),
+    strip.background = element_blank()
+    ) + facet_wrap(~time_frame, labeller = labeller(time_frame = 
+    c("TotalMinCrea" = "all follow-ups after KT", "min_before_sample_crea"= "time span KT to Sample","min_after_sample_crea"= "time span after Sample"))), width=7,height=4.7)
+
+
+mincrea_aftersample_plot<- extended.basic.info %>% filter(SampleID %in% cohort2_Ids & (!SampleID %in% out_samples)) %>% mutate(rej= case_when(rej == 0 ~ "Non Rejection", T ~ "Rejection")) %>% ggplot( aes(x=rej, y=min_after_sample_crea,fill=rej)) + geom_boxplot() + stat_compare_means(size=4,label.x.npc = "center", hjust=0.5) + ylab("Minimum Creatinine after Sample") + xlab("")  +  scale_fill_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic()+
+  theme(
+    #axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    
+    axis.text.x = element_text(color="black", size=11),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=11),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=11),
+    legend.position = "none",
+
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    strip.text = element_text(size=13),
+    strip.background = element_blank()
+    ) 
+
+
+ggsave("../plots/Figure3/c2_crea_plots_bef_aft_lastavail.pdf", min_crea_plot + mincrea_aftersample_plot + lastavail_crea_plot, width=8, height=4.5)
+
+```
+
+###1.1.4 Viral Infections 
+
+```{r}
+transformed_viral_infec
+```
+
+
+```{r}
+## add viral infection 
+extended.basic.info<- extended.basic.info %>% left_join(.,transformed_viral_infec %>% filter(!is.na(diagDate_virInfect)) %>% select(PatientID,diagDate_virInfect), by="PatientID") %>% 
+  ## calculate distanc from sample to diagnosis date 
+  mutate(ViralInfec_Sample_Distance= diagDate_virInfect- Date, .after= diagDate_virInfect) %>%
+  
+   ## if infection after sample, then delete info -> NAs or if infection is before tx and sample taken after tx
+  
+  mutate(diagDate_virInfect= case_when((ViralInfec_Sample_Distance >0 | (!bef_after_transplantation & (diagDate_virInfect < Transplantation_Date)))  ~as.Date(NA) , T ~ diagDate_virInfect)) %>%
+  mutate(ViralInfec_Sample_Distance = case_when((ViralInfec_Sample_Distance >0  | (!bef_after_transplantation & (diagDate_virInfect < Transplantation_Date)) ) ~ NA, T ~ ViralInfec_Sample_Distance))%>% 
+  
+  ## now group by sample, delete all empty rows if the sample has at least one row with an infection record
+   distinct() %>%  group_by(SampleID) %>%  
+  filter(!(is.na(ViralInfec_Sample_Distance) & is.na(diagDate_virInfect)
+     & sum(!is.na(ViralInfec_Sample_Distance) & !is.na(diagDate_virInfect)) >0) ) %>%
+### finally making it wide, numbering infections
+  mutate(row = row_number()) %>%
+  tidyr::pivot_wider(names_from = row, values_from = c(diagDate_virInfect, ViralInfec_Sample_Distance))
+```
+
+
+```{r}
+## adding any infection before sample, within 30 days before sample 
+
+extended.basic.info <- extended.basic.info %>% mutate(viralinfec_before_sample = case_when(if_any(.cols=starts_with("ViralInfec_Sample_Distance"),.fns=  ~  !is.na(.)) ~ "yes", T ~ "no"),  
+                                                      viralinfec_before_30d_sample = case_when(if_any(.cols=starts_with("ViralInfec_Sample_Distance"),.fns=  ~  . >= -30)  ~ "yes", T ~ "no"),
+                                                      .after= typeOfTx )
+
+extended.basic.info %>% filter(SampleID %in% in_samples) %>% group_by(rej) %>% filter(viralinfec_before_sample=="yes" ) %>% summarise(n())
+extended.basic.info %>% filter(SampleID %in% in_samples) %>% group_by(rej) %>% filter(viralinfec_before_30d_sample=="yes" ) %>% summarise(n())
+
+```
+```{r}
+extended.basic.info<-extended.basic.info %>% rename( Kreaanstieg=`Kreaanstieg >= 0.3 mg/dL`,Prednianderung= `Predni-Dosisänderung auf min. 250 mg`)
+```
+
+
+
+
+#3. Reduced Cohort 2 
+n=92
+rejection: 32 patients
+non rejection: 60 patients
+##3.1 Input
+
+```{r}
+red.cohort2.meta.input<- generate_meta_input(extended.basic.info %>% filter(SampleID %in% in_samples) %>% column_to_rownames("SampleID"), "rej", morevar=T)
+red.cohort2.meta.input$rej <- as.numeric(as.character(red.cohort2.meta.input$rej))
+
+red.cohort2.meta.input <- red.cohort2.meta.input %>% select(-Urea)
+```
+
+##3.2 Run
+```{r}
+c2_outpath <- "../plots/Figure3/MetaDeconfoundR"
+#genus
+red.cohort2.genus.output<- workflow_metadeconfound("Genus",  red.cohort2.meta.input,path,"../plots/Figure3/MetaDeconfoundR", split.var="rej" )
+
+
+#family
+red.cohort2.family.output<- workflow_metadeconfound("Family",  red.cohort2.meta.input,path,c2_outpath, split.var="rej" )
+
+# order
+red.cohort2.order.output<- workflow_metadeconfound("Order",  red.cohort2.meta.input,path,c2_outpath, split.var="rej" )
+
+# class
+red.cohort2.class.output<- workflow_metadeconfound("Class",  red.cohort2.meta.input,path,c2_outpath, split.var="rej" )
+
+#phylum
+red.cohort2.phylum.output<- workflow_metadeconfound("Phylum",  red.cohort2.meta.input,path,c2_outpath, split.var="rej" )
+
+
+together.red.cohort2.output <- rbind(red.cohort2.family.output %>% filter(metaVariable =="rej") , red.cohort2.genus.output %>% filter(metaVariable =="rej"), red.cohort2.order.output %>% filter(metaVariable =="rej"),red.cohort2.class.output %>% filter(metaVariable =="rej") ,red.cohort2.phylum.output %>% filter(metaVariable =="rej"))
+
+together.red.cohort2.output %>% mutate(FDR = p.adjust(Ps, method = "BH"))  %>% filter( FDR < 0.1)
+```
+
+
+
+##3.3 Confounders 
+
+```{r}
+confounding_table <- red.cohort2.genus.output %>% filter(metaVariable == "rej" & status != "NS" &  startsWith(status,"C") ) %>% mutate(taxa="Genus") %>% 
+  bind_rows(red.cohort2.family.output  %>% filter(metaVariable == "rej" & status != "NS" &  startsWith(status,"C")) %>% mutate(taxa="Family") ) %>%
+
+  
+  bind_rows(red.cohort2.order.output %>% filter(metaVariable == "rej" & status != "NS" &  startsWith(status,"C")) %>% mutate(taxa="Order") ) %>%
+  
+ bind_rows(red.cohort2.class.output %>% filter(metaVariable == "rej" & status != "NS" &  startsWith(status,"C")) %>% mutate(taxa="Class") ) %>%
+
+    bind_rows(red.cohort2.phylum.output %>% filter(metaVariable == "rej" & status != "NS" &  startsWith(status,"C")) %>% mutate(taxa="Phylum") ) %>%
+
+
+              mutate(feature=sub(".*\\;", "", feature), Qs=round(Qs,3), Ds=round(Ds,3)) %>% relocate(taxa) %>% select(-metaVariable,-Ps)
+
+## confounder of the rejection status are viral infections and disease of the patient
+confounding_table
+write.table(confounding_table, "../plots/Figure3/MetaDeconfoundR/confounders.tsv", sep="\t", quote = F, na="",  row.names = F)
+
+```
+
+
+
+
+##3.4 Visualization 
+
+###3.4.1 Heatmap 
+#### Family
+```{r}
+metavariables_plot <- data.frame(machine=names(red.cohort2.meta.input), human= human_variable_name)
+
+BuildHeatmap(red.cohort2.family.output)
+
+heatmap_family_paper <- prettify_heatmap(red.cohort2.family.output,stars_size=2.6, change_order =  c("Rejection", "Age","Creatinine", "MinCreatinine",  "Donor Age (35-40)")) + theme(axis.text.y = element_text(color="black", size=9), axis.text.x = element_text(color="black", size=9), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=8.5) ) 
+
+ggsave("../plots/Figure3/heatmap_family_viridis.pdf", heatmap_family_paper + scale_fill_viridis_c( direction =-1)  
+ ,width=6.5, height=7)
+
+
+ggsave("../plots/Figure3/heatmap_family_inferno.pdf", heatmap_family_paper + scale_fill_viridis(option = "inferno", direction=-1)  
+ ,width=6.5, height=7)
+
+
+ggsave("../plots/Figure3/heatmap_family_plasma.pdf", heatmap_family_paper + scale_fill_viridis(option = "plasma", direction=-1)  
+ ,width=6.5, height=7)
+
+ggsave("../plots/Figure3/heatmap_family_PiYG.pdf", heatmap_family_paper +  scale_fill_distiller(palette = "PiYG") 
+ ,width=6.5, height=7)
+```
+#### Genus 
+
+```{r}
+metavariables_plot <- data.frame(machine=names(red.cohort2.meta.input), human= human_variable_name[-65])
+
+BuildHeatmap(red.cohort2.genus.output)
+
+# 
+heatmap_genus_paper <- prettify_heatmap(red.cohort2.genus.output,stars_size=2.6,  mvs= data.frame(machine=names(red.cohort2.meta.input), human= human_variable_name[-65]),change_order =  c("Rejection","Creatinine", "MinCreatinine","BMI",  "Donor Age (60-65)", "CRP")
+ ) + theme(axis.text.y = element_text(color="black", size=9), axis.text.x = element_text(color="black", size=9), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=8.5) ) 
+
+
+ggsave("../plots/Figure3/heatmap_genus_PiYG.pdf", heatmap_genus_paper +  scale_fill_distiller(palette = "PiYG") 
+ ,width=6.5, height=8.5)
+```
+
+
+###3.4.2 Volcano Genus 
+
+```{r}
+ volcano_genus <- generate_volcano_plot(red.cohort2.genus.output, absolute = F, highfeatures = c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus"), high_n = 30,text_size = 3, annotation=T) + 
+theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=9),
+    axis.title.y  =element_text(size=9),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) 
+
+ggsave("../plots/Figure3/volcano_genus_n30.pdf", volcano_genus
+,  width = 6.5, height = 4)
+
+```
+##3.5 Save output
+```{r}
+write.table( red.cohort2.family.output, "../plots/Figure3/MetaDeconfoundR/c2_metadeconfoundR_output_family.tsv", quote = F, col.names = T, row.names = F, sep="\t", na="" )
+
+write.table( red.cohort2.genus.output, "../plots/Figure3/MetaDeconfoundR/c2_metadeconfoundR_output_genus.tsv", quote = F, col.names = T, row.names = F, sep="\t", na="" )
+```
+
+
+
+
+#4. Without MMF stop
+
+
+```{r}
+#initial_immunosuppression_table <- read_excel("Rosa/tables/20240313_immunosuppression.xlsx")
+
+mmf_stoppers<- initial_immunosuppression_table %>% filter(stop_MMF_before_sample =="yes") %>% pull(PatientID)
+
+```
+
+
+##4.1 Input
+
+```{r}
+mmf.stop.meta.input<- generate_meta_input(extended.basic.info %>% filter(SampleID %in% in_samples & !(PatientID %in% mmf_stoppers )) %>% column_to_rownames("SampleID"), "rej", morevar=T)
+mmf.stop.meta.input$rej <- as.numeric(as.character(mmf.stop.meta.input$rej))
+
+mmf.stop.meta.input <- mmf.stop.meta.input %>% select(-Urea)
+```
+
+##4.2 Run
+```{r}
+c2_outpath <- "../plots/Figure3/MetaDeconfoundR/MMF"
+#genus
+mmf.stop.genus.output<- workflow_metadeconfound("Genus",  mmf.stop.meta.input,path,"../plots/Figure3/MetaDeconfoundR/MMF", split.var="rej" )
+
+
+#family
+mmf.stop.family.output<- workflow_metadeconfound("Family",  mmf.stop.meta.input,path,c2_outpath, split.var="rej" )
+
+# order
+mmf.stop.order.output<- workflow_metadeconfound("Order",  mmf.stop.meta.input,path,c2_outpath, split.var="rej" )
+
+# class
+mmf.stop.class.output<- workflow_metadeconfound("Class",  mmf.stop.meta.input,path,c2_outpath, split.var="rej" )
+
+#phylum
+mmf.stop.phylum.output<- workflow_metadeconfound("Phylum",  mmf.stop.meta.input,path,c2_outpath, split.var="rej" )
+
+
+together.mmf.output <- rbind(mmf.stop.family.output %>% filter(metaVariable =="rej") , mmf.stop.genus.output %>% filter(metaVariable =="rej"), mmf.stop.order.output %>% filter(metaVariable =="rej"),mmf.stop.class.output %>% filter(metaVariable =="rej") ,mmf.stop.phylum.output %>% filter(metaVariable =="rej"))
+
+together.red.cohort2.output %>% mutate(FDR = p.adjust(Ps, method = "BH"))  %>% filter( FDR < 0.1)
+```
+##4.4 Visualization
+
+###4.4.1 Heatmap
+
+#### Family
+
+```{r}
+BuildHeatmap(mmf.stop.family.output)
+
+heatmap_mmf_paper <- prettify_heatmap(mmf.stop.family.output,stars_size=2.6, change_order =  c("Rejection", "Age","weightAtTx.kg", "CRP")) + theme(axis.text.y = element_text(color="black", size=9), axis.text.x = element_text(color="black", size=9), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=8.5) )  
+
+ggsave("../plots/Figure3/heatmap_MMF_family_PiYG.pdf", heatmap_mmf_paper +  scale_fill_distiller(palette = "PiYG") 
+ ,width=6.5, height=7)
+
+```
+#### Genus 
+
+```{r}
+BuildHeatmap(mmf.stop.genus.output)
+heatmap_mmf_paper <- prettify_heatmap(mmf.stop.genus.output,stars_size=2.6, change_order =  c("Rejection", "Creatinine", "BMI","weightAtTx.kg", "CRP")) + theme(axis.text.y = element_text(color="black", size=9), axis.text.x = element_text(color="black", size=9), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=8.5) )  
+
+ggsave("../plots/Figure3/heatmap_MMF_genus_PiYG.pdf", heatmap_mmf_paper +  scale_fill_distiller(palette = "PiYG") 
+ ,width=7.5, height=8)
+```
+
+###4.4.2 Volcano Genus 
+
+```{r}
+ volcano_genus <- generate_volcano_plot(mmf.stop.genus.output, absolute = F, high_n = 4,text_size = 3, annotation=F) + 
+theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=9),
+    axis.title.y  =element_text(size=9),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    )
+
+ggsave("../plots/Figure3/MMF_volcano_genus.pdf", volcano_genus
+,  width = 5, height = 4)
+
+```
+
+#5 Comparison with MMF run
+```{r}
+ggvenn::ggvenn(list(complete=together.red.cohort2.output %>% filter(Qs <0.1) %>% pull(feature), without_mmf_stoppers=together.mmf.output %>% filter(Qs <0.1) %>% pull(feature)))
+
+ggvenn::ggvenn(list(c2= red.cohort2.genus.output %>% filter(Qs <0.1 & metaVariable=="rej") %>% pull(feature), mmf=mmf.stop.genus.output %>% filter(metaVariable =="rej") %>% filter(Qs <0.1) %>% pull(feature)))
+
+ggvenn::ggvenn(list(c2= red.cohort2.family.output %>% filter(Qs <0.1 & metaVariable=="rej") %>% pull(feature), mmf=mmf.stop.family.output %>% filter(metaVariable =="rej") %>% filter(Qs <0.1) %>% pull(feature)))
+
+
+together.mmf.output %>% filter(Qs < 0.1 & ! feature %in% (together.red.cohort2.output %>% filter(Qs <0.1) %>% pull(feature)))
+```
+## 5.1 Effect Size Flower Plot 
+```{r}
+
+make_flowerplot <- function(input1, input2, alpha=0.1,text_size=3, bacteria=NULL){
+  alpha=alpha
+  
+ plot<- full_join(input1 , input2 %>% rename(Ds2=Ds, Qs2=Qs) %>% select(Ds2,Qs2, feature), by="feature")   %>% mutate(signif_status= case_when(Qs <alpha & Qs2 < alpha~ "both", Qs <alpha &( Qs2 > alpha |is.na(Qs2)) ~ "only input1", Qs >alpha & Qs2 < 0.1 ~ "only input2", (Qs >alpha | is.na(Qs)) & (Qs2 > alpha|is.na(Qs2)) ~ "NS")) %>% mutate(feature=sub(".*\\;", "", feature)) %>% mutate(annotate=case_when(feature %in% bacteria ~ feature, T~NA)) %>%
+ ggplot(aes(x=Ds, y=Ds2)) + geom_point(aes(color=signif_status))  + 
+  theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=9),
+    axis.title.y  =element_text(size=9),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + scale_color_manual(values=c("darkgreen", "darkgray", "darkblue", "yellow" ))
+     
+  
+  if(! is.null(bacteria)){
+  return(plot + geom_text_repel( aes(label=annotate), size=text_size,vjust = -1,colour="black"))
+    
+  }
+else{
+  return(plot)
+} 
+}
+
+make_flowerplot(together.red.cohort2.output  , together.mmf.output) +
+  scale_color_manual(values=c("black", "grey", "darkgreen", "yellowgreen" ), labels = c("in both", "n.s.", "only in C2", "only without MMF stoppers"))+ xlab("C2 (n=92) Cliff's Delta") + ylab("Without MMF stoppers (n=84) Cliff's Delta")   + stat_cor(method = "spearman", label.x = -0.5, label.y = 0.45) 
+
+ggsave("../plots/Figure3/C2_MMF_DoubleVolcano.pdf", width=7, height=4.5)
+
+```
+
+
+
+# 6. Post Event
+##6.1 Input
+
+```{r}
+## within rejection arm 
+postEvent.rej.meta.input<- generate_meta_input(extended.basic.info %>% filter(SampleID %in% (postEvent_samples %>% filter(rej==1) %>% pull(SampleID))) %>% column_to_rownames("SampleID"), "rej", morevar=T) %>% mutate(rej= case_when(Event_day_diffs <=3 ~ "0", T ~"1")) 
+
+postEvent.rej.meta.input$rej <- as.numeric(as.character(postEvent.rej.meta.input$rej))
+
+postEvent.rej.meta.input<- postEvent.rej.meta.input %>% select(-Urea)
+
+## within hc arm 
+postEvent.hc.meta.input<- generate_meta_input(extended.basic.info %>% filter(SampleID %in% (postEvent_samples %>% filter(rej==0) %>% pull(SampleID))) %>% column_to_rownames("SampleID"), "rej", morevar=T) %>% rownames_to_column("SampleID") %>% mutate(rej= case_when(SampleID %in% in_samples ~ 0, T ~1)) %>% column_to_rownames("SampleID")
+
+postEvent.hc.meta.input$rej <- as.numeric(as.character(postEvent.hc.meta.input$rej))
+
+postEvent.hc.meta.input<- postEvent.hc.meta.input %>% select(-Urea)
+
+table(postEvent.hc.meta.input$rej)
+table(postEvent.rej.meta.input$rej)
+
+```
+##6.2 Run
+```{r}
+postEvent.rej.genus.output<- MetaDeconfound(postEvent_rej_featureinput %>% select(DZIF_signif_genus$feature), postEvent.rej.meta.input, returnLong = T)
+
+postEvent.hc.genus.output<- MetaDeconfound(postEvent_hc_featureinput %>% select(DZIF_signif_genus$feature), postEvent.hc.meta.input, returnLong = T)
+
+prettify_heatmap(postEvent.rej.genus.output)
+  
+#workflow_metadeconfound("Genus",  postEvent.hc.meta.input,path,"../plots/Figure5/metadeconfoundR", split.var="rej" )
+#postEvent.rej.genus.output<- workflow_metadeconfound("Genus",  postEvent.rej.meta.input,path,"../plots/Figure5/metadeconfoundR/rej", split.var="rej" )
+
+prettify_heatmap( rbind(postEvent.rej.genus.output, 
+                        dzif_hmp %>% filter(feature %in% DZIF_signif_genus$feature) %>% mutate(metaVariable=case_when(metaVariable =="rej" ~ "C2:Rej")) ,
+                        postEvent.hc.genus.output %>% mutate(metaVariable=case_when(metaVariable =="rej" ~ "Non Rejection"))) %>% filter(metaVariable %in% c("C2:Rej", "rej", "Non Rejection")),  
+                  keepMeta=c("Non Rejection"), mvs = data.frame(machine=c("C2:Rej","rej", "Non Rejection"), human=c("C2:Rej","Pre/Post Rejection", "Non Rejection")), change_order = c("C2:Rej","Pre/Post Rejection", "Non Rejection")  ) + scale_fill_distiller(palette="PiYG") +  scale_y_discrete(limits = c( make.unique(sub(".*\\;", "", DZIF_signif_genus  %>% arrange(Ds) %>%pull(feature) )))  )
+
+ggsave("../plots/Figure5/heatmap_C2_longitudinal.pdf", width = 10,height=9.5)
+
+
+```
+## 6.3 Abundance boxplots
+```{r}
+#Streptococcus, Fusobacterium, Blautia, Faecalibacterum
+
+postEvent_rej_featureinput <- get_count_table(path, "Genus", filter=F, samplelist=postEvent_samples %>% filter(rej==1) %>% pull(SampleID))
+
+postEvent_hc_featureinput <- get_count_table(path, "Genus", filter=F, samplelist=postEvent_samples %>% filter(rej==0) %>% pull(SampleID))
+
+## rej counts
+data.frame(t(  data.frame(t(postEvent_rej_featureinput)) %>% rownames_to_column("feature") %>%  mutate(feature=sub(".*\\;", "",feature) ) %>% filter(feature %in% c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus"))  %>% column_to_rownames("feature")))%>% cbind( postEvent.rej.meta.input %>% mutate(rej=case_when(rej==0 ~"Pre Rejection", T~"Post Rejection")) %>% select(grp=rej),.) %>% 
+## hc couunts  
+rbind(data.frame(t(  data.frame(t(postEvent_hc_featureinput)) %>% rownames_to_column("feature") %>%  mutate(feature=sub(".*\\;", "",feature) ) %>% filter(feature %in% c("Blautia", "Fusobacterium", "Faecalibacterium","Streptococcus"))  %>% column_to_rownames("feature")))%>% cbind( postEvent.hc.meta.input %>% mutate(rej=case_when(rej==0 ~"Non Rejection 1", T~"Non Rejection 2")) %>% select(grp=rej),.)) %>% rownames_to_column("SampleID") %>% left_join(postEvent_samples %>% select(SampleID, PatientID), by="SampleID") %>%
+gather( "feature", "count",-c(grp,SampleID, PatientID) ) %>% mutate(grp=factor(grp, levels=c("Non Rejection 1", "Non Rejection 2", "Pre Rejection", "Post Rejection"))) %>% arrange(PatientID,feature,grp) %>%
+  ggplot(aes(x=grp, y=log(count + 1), fill=grp)) + geom_boxplot(color="black") + facet_wrap(~feature, scales="free_y") + 
+  xlab("")  + ylab("log2(count +1)") + 
+  theme_classic() + 
+    stat_compare_means(size=3,label.x.npc = "center", comparisons=list(c("Non Rejection 1","Non Rejection 2"), c("Pre Rejection", "Post Rejection")),label= "p.format", paired=T) +
+     geom_line(aes(group = PatientID), linetype="dotted")+
+   theme(
+    strip.text = element_text(size=15),
+    strip.background = element_blank(),
+   # strip.background = element_rect(fill="white", linewidth = 0),
+    #line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=12),
+    
+    axis.text.x = element_text(color="black", size=9),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=20),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.position="none",
+    
+   panel.border = element_blank(),
+    panel.background = element_blank()) +
+  geom_point()+
+    scale_fill_manual( values=c( "#0072B5FF", "midnightblue" ,"#BC3C29FF","#8d3d75")) 
+
+ggsave("../plots/Figure5/postEvent_Bugs_abund_plots.pdf", width=8.5, height=6.5)
+
+
+
+```
+## 6.4 Heatmap 
+```{r}
+
+
+prettify_heatmap( rbind(dzif_hmp,reference_hmp,dzif_preKT_hmp) %>% mutate(Ds=scale(Ds)),  keepMeta=c("origin")
+  , mvs = data.frame(machine=c("grp", "rej", "origin"), human=c("CKD/HC","DZIF rej", "DZIF preKT") )  )  + scale_fill_distiller(palette = "PiYG") + scale_y_discrete(limits = c( c("observed", "diversity_shannon", "evenness_simpson"), make.unique(sub(".*\\;", "", DZIF_signif_genus %>% arrange(Ds) %>%pull(feature) )))  ) 
+```
+
+
+
+
+
+#7. All Rej vs Non Rej 
+Figure 2
+##7.1 Input Preparation
+```{r}
+
+all_rej_nonrej.meta.input<- generate_meta_input(extended.basic.info %>% filter(origin=="Empfänger" & Transplantation_day_diffs >= 1 ) %>% column_to_rownames("SampleID"), "rej", morevar=F)
+all_rej_nonrej.meta.input$rej <- as.numeric(as.character(all_rej_nonrej.meta.input$rej))
+
+data.frame(machine=names(all_rej_nonrej.meta.input), human= human_variable_name)
+
+```
+
+##7.2 Run
+```{r}
+nonrej_rej_outpath <- "../plots/Figure2/MetadeconfoundR"
+#genus
+all_rej_nonrej.genus.output<- workflow_metadeconfound("Genus",  all_rej_nonrej.meta.input,path,nonrej_rej_outpath, split.var="rej" )
+
+#family
+all_rej_nonrej.family.output<- workflow_metadeconfound("Family",  all_rej_nonrej.meta.input,path,nonrej_rej_outpath, split.var="rej" )
+
+# order
+all_rej_nonrej.order.output<- workflow_metadeconfound("Order",  all_rej_nonrej.meta.input,path,nonrej_rej_outpath, split.var="rej" )
+
+# class
+all_rej_nonrej.class.output<- workflow_metadeconfound("Class",  all_rej_nonrej.meta.input,path,nonrej_rej_outpath, split.var="rej" )
+
+#phylum
+all_rej_nonrej.phylum.output<- workflow_metadeconfound("Phylum",  all_rej_nonrej.meta.input,path,nonrej_rej_outpath, split.var="rej" , abundance_filter=0.05)
+
+
+together.all_rej_nonrej.output <- rbind(all_rej_nonrej.family.output  %>% mutate(taxa="Family") , all_rej_nonrej.genus.output %>% mutate(taxa="Genus"), all_rej_nonrej.order.output  %>% mutate(taxa="Order"),all_rej_nonrej.class.output %>% mutate(taxa="Class") ,all_rej_nonrej.phylum.output  %>% mutate(taxa="Phylum"))
+
+together.all_rej_nonrej.output %>% filter(metaVariable =="rej") %>% mutate(FDR = p.adjust(Ps, method = "BH"))  %>% filter( FDR < 0.1) 
+together.all_rej_nonrej.output%>% filter(metaVariable =="rej") %>% mutate(FDR = p.adjust(Ps, method = "BH"))  %>% filter( Qs < 0.1)
+
+write.table(together.all_rej_nonrej.output %>% filter(startsWith(status, "C:")) %>% relocate(taxa) %>% arrange(metaVariable) %>% mutate(feature=make.unique(sub(".*\\;", "", sub( "_", "",feature)))), "../plots/Figure2/all_rej_nonrej_confounder.tsv", quote = F, col.names = T, row.names = F, sep="\t", na="")
+```
+
+age, sex, and distance to Tx as confounder
+
+##7.3 Visualization
+### 7.3.1 Volcano
+```{r}
+generate_volcano_plot(all_rej_nonrej.genus.output, annotation = F) 
+#ggsave( "../plots/Figure2/MetadeconfoundR/volcano_genus.pdf", width = 6,height=4)
+
+generate_volcano_plot(all_rej_nonrej.genus.output, annotation = T,absolute = T, high_n = 4,text_size = 3.5) 
+
+#ggsave( "../plots/Figure2/MetadeconfoundR/volcano_genus_annotated.pdf", width = 6,height=4)
+
+```
+
+
+
+###7.3.2 Heatmap 
+#### Family
+```{r}
+prettify_heatmap(all_rej_nonrej.family.output,stars_size=2.6, change_order = c("Rejection", "Age", "KT Day Difference", "Event Day Difference", "Donor Age (10-15)", "Donor Age (15-20)", "Donor Age (35-40)", "Donor Age (45-50)", "Donor Age (60-65)", 
+                                                                                "Donor Age (70-75)","Donor Age (>80)"
+                 
+                 
+                 )) + theme(axis.text.y = element_text(color="black", size=7.5), axis.text.x = element_text(color="black", size=8), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=8.5)) +  scale_fill_distiller(palette = "PiYG")
+
+ggsave("../plots/Figure2/MetadeconfoundR/heatmap_family.pdf",width=6.5, height=7.8)
+```
+#### Genus
+
+```{r}
+prettify_heatmap(all_rej_nonrej.genus.output,stars_size=2.6, change_order = c("Rejection", "Age", "KT Day Difference", "Event Day Difference", "Donor Age (10-15)", 
+                                                                              "Donor Age (15-20)",
+                                                                              "Donor Age (20-25)",
+                                                                              "Donor Age (35-40)",
+                                                                              "Donor Age (40-45)",
+                                                                              "Donor Age (45-50)",
+                                                                              "Donor Age (70-75)",
+                                                                              "Donor Age (75-80)",
+                                                                              "Donor Age (>80)"
+                 
+                 
+                 )) + theme(axis.text.y = element_text(color="black", size=7.5), axis.text.x = element_text(color="black", size=7), legend.text = element_text(color="black", size=8), legend.title = element_text(color="black", size=7)) +  scale_fill_distiller(palette = "PiYG")
+
+
+ggsave("../plots/Figure2/MetadeconfoundR/all_rej_non_rej_heatmap_genus.pdf",width=6.5, height=13)
+
+```
+
+
+
+

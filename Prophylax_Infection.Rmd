@@ -1,0 +1,898 @@
+---
+title: "Prophylaxe and Infections"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dpylr)
+library(tidyr)
+library(ggplot2)
+```
+basic.info is the table containing the basic variables for the patient and samples: patientId, sampleid, dates of KT,Event,Sample, rejection status...
+basic.info is given as table in the supplement
+
+#0. Reading Filtered Tables 
+
+those are all files merged by either identical container, if this information is given in the file or merged by PatientID if not
+```{r}
+mergeContainer <- read.csv("../Oct22/all_files_containing_patient_information/filtered/mergeContainer.tab", sep="\t", header=T)
+mergePatient <- read.csv("../Oct22/all_files_containing_patient_information/filtered/mergePatientID.tab", sep="\t", header=T)
+
+colnames(mergeContainer)
+```
+
+## General Checks 
+
+some check up of those created files
+G945MJK9 with 108 rows !
+```{r}
+G945MJK9_df <- mergeContainer %>% filter(PatientID == "G945MJK9")
+#distinct(as.data.frame(t( G945MJK9_df)))
+
+#distinct(as.data.frame(t(G945MJK9_df$Container)))
+
+filtered.col <- t(as.data.frame(t( G945MJK9_df)) %>% rowwise() %>%  filter(!all(c_across(everything()) == first(c_across(everything())))) %>% ungroup())
+
+## in fact all different entries due to an infection and different treatments 
+(as.data.frame(filtered.col) %>% distinct())
+
+```
+
+
+any intersection container and sample container ? -> no 
+```{r}
+basic.info %>% select(PatientID, SampleID=name, Container) %>% filter(Container %in%  mergeContainer$Container)
+basic.info %>% select(PatientID, SampleID=name, Container) %>% filter(PatientID %in%  mergeContainer$PatientID)
+
+## "intresting" dates if matching with continer is not working 
+mergeContainer %>% select(contains("date") & !contains("AGE")) %>% colnames()
+```
+
+
+different files for prophylaxis, antimicrobil treatments, infections and complications 
+
+1.3.4 Prophylaxis 
+1.3.4 AntiBacterial 
+1.3.4 NeBhbvST and NeBhcvST only one entry each -> ignoring them 
+1.3.4 AntiViral 
+1.3.4 AntiFungal 
+1.3.4 Anti-infectiveprophylax -> summary of the files above but capturing the BL values , no container , PatientID based 
+
+3.1.4 Prophylax files , either empty or almost empty with only one row of information -> ignoring them 
+
+missing end of adminstriation  or duration info 
+
+#1. Prophylaxis
+
+column names containging "Pr" are refering to Prophylaxis
+
+```{r}
+# Bacterial Prophylax 163 patients 
+mergeContainer %>% filter(!is.na(AntibacName.NeBPr.NeBAn))  %>% filter(PatientID %in% patientIDs) %>% summarise(n=n_distinct(PatientID))
+
+### Viral Prophylax 135 patients
+mergeContainer %>% filter(!is.na(AntiviralName.NeBPr.NeBAn)) %>% filter(PatientID %in% patientIDs) %>% summarise(n=n_distinct(PatientID))
+
+### Fungal prophylax 115 patients
+mergeContainer %>% filter(!is.na(AntifungName.NeBPr.NeBAn)) %>% filter(PatientID %in% patientIDs) %>% summarise(n=n_distinct(PatientID))
+
+```
+##1.1 Bacterial Prophylax 
+
+```{r}
+bac.prophylax <- mergeContainer %>% filter(!is.na(AntibacName.NeBPr.NeBAn)) %>% mutate(AntibacName.NeBPr.NeBAn = case_when(AntibacName.NeBPr.NeBAn == "Other antibacterials" & !is.na(otherAntibacText.NeBPr.NeBAn) ~ otherAntibacText.NeBPr.NeBAn, T ~ AntibacName.NeBPr.NeBAn ))
+
+table(bac.prophylax$AntibacName.NeBPr.NeBAn)
+
+ bac.prophylax %>% group_by(PatientID) %>% summarise(number.of.prophylax = n_distinct(AntibacName.NeBPr.NeBAn)) %>% pull(number.of.prophylax) %>% table()
+
+
+```
+
+
+
+### Distance to Samples for bacterial prophylax 
+
+```{r}
+
+bac.match <- mergeContainer %>% select(PatientID, AntibacName.NeBPr.NeBAn, AntibacDate.NeBPr.NeBAn,routeOfAdminstrationAntibac.NeBPr.NeBAn) %>% full_join(SampleDates, by= "PatientID") %>% filter(!is.na(AntibacDate.NeBPr.NeBAn) & PatientID %in% patientIDs ) #AntifungName.NeBPr.NeBAn, AntifungDate.NeBPr.NeBAn, AntiviralName.NeBPr.NeBAn, AntiviralProDate.NeBPr.NeBAn
+
+## minimum distance between sample date and admission date of drug 
+
+bac.match<- bac.match  %>% filter(as.Date(SampleDate) - as.Date(AntibacDate.NeBPr.NeBAn, format="%d.%m.%Y") >= 0) %>% 
+  mutate( distance= as.Date(SampleDate) - as.Date(AntibacDate.NeBPr.NeBAn, format="%d.%m.%Y") )%>% 
+  group_by(PatientID, SampleID) %>% slice_min(distance) %>% distinct()
+
+summary(as.numeric(bac.match$distance))
+hist(as.numeric(bac.match$distance))
+
+n_distinct(bac.match$PatientID)
+
+bac.match <- right_join(select(basic.info, SampleID=name, PatientID, Transplantation_Date, Event_Date), bac.match, by=c("PatientID","SampleID")) 
+
+summary(as.numeric(as.Date(bac.match$AntibacDate.NeBPr.NeBAn, format="%d.%m.%Y") - bac.match$Transplantation_Date))
+
+
+bac.prophylax_timeline <- mergeContainer %>% select(PatientID, AntibacName.NeBPr.NeBAn, AntibacDate.NeBPr.NeBAn,routeOfAdminstrationAntibac.NeBPr.NeBAn,otherAntibacText.NeBPr.NeBAn)  %>% 
+mutate(AntibacName.NeBPr.NeBAn = case_when(AntibacName.NeBPr.NeBAn == "Other antibacterials" & !is.na(otherAntibacText.NeBPr.NeBAn) ~ otherAntibacText.NeBPr.NeBAn, 
+                                           T ~ AntibacName.NeBPr.NeBAn )) %>%
+  filter(!is.na(AntibacDate.NeBPr.NeBAn) & PatientID %in% patientIDs ) %>% 
+  left_join(distinct(select(basic.info, PatientID, Transplantation_Date, Event_Date)), by="PatientID") %>% 
+  relocate(Transplantation_Date, Event_Date, .after=PatientID) %>% relocate(AntibacName.NeBPr.NeBAn, .before=routeOfAdminstrationAntibac.NeBPr.NeBAn) %>% 
+  distinct() %>% 
+  mutate(AntibacDate.NeBPr.NeBAn = as.Date(AntibacDate.NeBPr.NeBAn,format="%d.%m.%Y")) %>%
+  mutate(Tx_distance=AntibacDate.NeBPr.NeBAn - Transplantation_Date) %>%
+    select(-otherAntibacText.NeBPr.NeBAn)
+
+ggplot(bac.prophylax_timeline, aes(x=as.numeric(Tx_distance))) + geom_histogram()
+
+
+
+```
+##1.2 Viral Prophylax 
+
+
+```{r}
+viral.match <- mergeContainer %>% select(PatientID, AntiviralName.NeBPr.NeBAn, AntiviralProDate.NeBPr.NeBAn,routeOfAdminstrationAntiviral.NeBPr.NeBAn) %>% full_join(SampleDates, by= "PatientID") #AntifungName.NeBPr.NeBAn, AntifungDate.NeBPr.NeBAn, AntiviralName.NeBPr.NeBAn, AntiviralProDate.NeBPr.NeBAn
+
+
+viral.match<- viral.match  %>% filter(as.Date(SampleDate) - as.Date(viral.match$AntiviralProDate.NeBPr.NeBAn, format="%d.%m.%Y") >= 0) %>% 
+  mutate( distance= as.Date(SampleDate) - as.Date(AntiviralProDate.NeBPr.NeBAn, format="%d.%m.%Y") )%>% 
+  group_by(PatientID, SampleID) %>% slice_min(distance) %>% distinct()
+
+
+viral.prophylax_timeline <- mergeContainer %>% select(PatientID, AntiviralProDate.NeBPr.NeBAn, AntiviralName.NeBPr.NeBAn, routeOfAdminstrationAntiviral.NeBPr.NeBAn)  %>% 
+  filter(!is.na(AntiviralProDate.NeBPr.NeBAn) & PatientID %in% patientIDs ) %>% 
+  left_join(distinct(select(basic.info, PatientID, Transplantation_Date, Event_Date)), by="PatientID") %>% 
+  relocate(Transplantation_Date, Event_Date, .after=PatientID) %>%
+  distinct() %>% 
+  mutate(AntiviralProDate.NeBPr.NeBAn = as.Date(AntiviralProDate.NeBPr.NeBAn,format="%d.%m.%Y")) %>%
+  mutate(Tx_distance=AntiviralProDate.NeBPr.NeBAn - Transplantation_Date)
+
+summary(as.numeric(viral.prophylax_timeline$Tx_distance))
+
+
+
+summary(as.numeric(viral.match$distance))
+table(viral.match$AntiviralName.NeBPr.NeBAn)
+
+n_distinct(viral.match$PatientID)
+
+```
+
+
+
+##1.3 Fungal Prophylax 
+
+```{r}
+fungal.match <- mergeContainer %>% select(PatientID, AntifungName.NeBPr.NeBAn, AntifungDate.NeBPr.NeBAn,routeOfAdminstrationAntifung.NeBPr.NeBAn) %>% full_join(SampleDates, by= "PatientID") #AntifungName.NeBPr.NeBAn, AntifungDate.NeBPr.NeBAn, AntiviralName.NeBPr.NeBAn, AntiviralProDate.NeBPr.NeBAn
+
+
+fungal.match<- fungal.match  %>% filter(as.Date(SampleDate) - as.Date(AntifungDate.NeBPr.NeBAn, format="%d.%m.%Y") >= 0) %>% 
+  mutate( fung.distance= as.Date(SampleDate) - as.Date(AntifungDate.NeBPr.NeBAn, format="%d.%m.%Y") )%>% 
+  group_by(PatientID, SampleID) %>% slice_min(fung.distance) %>% distinct()
+
+summary(as.numeric(fungal.match$fung.distance))
+table(fungal.match$AntifungName.NeBPr.NeBAn)
+
+n_distinct(fungal.match$PatientID)
+
+fungal.prophylax_timeline <- mergeContainer %>% select(PatientID,AntifungDate.NeBPr.NeBAn,  AntifungName.NeBPr.NeBAn, routeOfAdminstrationAntifung.NeBPr.NeBAn)  %>% 
+  filter(!is.na(AntifungDate.NeBPr.NeBAn) & PatientID %in% patientIDs ) %>% 
+  left_join(distinct(select(basic.info, PatientID, Transplantation_Date, Event_Date)), by="PatientID") %>% 
+  relocate(Transplantation_Date, Event_Date, .after=PatientID) %>%
+  distinct() %>% 
+  mutate(AntifungDate.NeBPr.NeBAn = as.Date(AntifungDate.NeBPr.NeBAn,format="%d.%m.%Y")) %>%
+  mutate(Tx_distance=AntifungDate.NeBPr.NeBAn - Transplantation_Date)
+
+
+```
+##1.4 Merging Prophylaxis 
+
+```{r}
+prophylaxis_timeline <- full_join(full_join(fungal.prophylax_timeline, viral.prophylax_timeline, by=c("PatientID", "Transplantation_Date", "Event_Date")), bac.prophylax_timeline, by=c("PatientID", "Transplantation_Date", "Event_Date"))
+
+
+fungal.prophylax_timeline<- fungal.prophylax_timeline %>% rename(Prophylaxis_Date=AntifungDate.NeBPr.NeBAn, Prophylaxis_Name= AntifungName.NeBPr.NeBAn, Prophylaxis_Adminstration=routeOfAdminstrationAntifung.NeBPr.NeBAn) %>% mutate(Type= rep("fungal", nrow(fungal.prophylax_timeline)))
+
+viral.prophylax_timeline <-  viral.prophylax_timeline  %>% rename(Prophylaxis_Date=AntiviralProDate.NeBPr.NeBAn, Prophylaxis_Name= AntiviralName.NeBPr.NeBAn, Prophylaxis_Adminstration=routeOfAdminstrationAntiviral.NeBPr.NeBAn) %>% mutate(Type= rep("viral", nrow(viral.prophylax_timeline)))
+
+
+bac.prophylax_timeline <- bac.prophylax_timeline %>% rename(Prophylaxis_Date=AntibacDate.NeBPr.NeBAn, Prophylaxis_Name= AntibacName.NeBPr.NeBAn, Prophylaxis_Adminstration=routeOfAdminstrationAntibac.NeBPr.NeBAn) %>% mutate(Type= rep("bacterial", nrow(bac.prophylax_timeline)))
+
+
+prophylaxis_timeline <- rbind(fungal.prophylax_timeline, bac.prophylax_timeline, viral.prophylax_timeline ) %>% arrange(PatientID) %>% relocate(Type, .after=Event_Date)
+
+
+write.table(prophylaxis_timeline, "MetaDataProcessing/prophylaxis_timeline.tsv", sep="\t", quote = F, row.names = F, col.names = T)
+
+paste(unique(prophylaxis_timeline$Prophylaxis_Name), collapse=".")
+
+
+write.table(prophylaxis_timeline %>% filter(PatientID %in% cohort2_patients), "../tables/ClinicalData/Cohort2/prophylaxis_timeline.tsv", sep="\t", quote = F, row.names = F, col.names = T)
+
+```
+
+##1.5 Modification of the Prophylaxis Table 
+
+some entries of prophylaxis are no prophylaxis but full on antimicrobial treatment
+-> deleting them from the table 
+
+```{r}
+## wrong date given, correction:
+prophylaxis_timeline[prophylaxis_timeline$PatientID == "Y980VYP6", "Tx_distance"] <- 1
+
+## based on Felix B. 
+not_prophylaxis <- prophy_timeline %>% filter(Prophylaxis_Type == "bacterial" & ((PatientID == "2EJGX6A4" & Tx_distance >=14) | 
+                             (PatientID == "58T4MHL7" & Tx_distance %in% c(5,6,14,24)) | 
+                              (PatientID == "EJWTQU66" & Tx_distance %in% c(11,13)) | 
+                              (PatientID == "JEG9X7C9" & Tx_distance %in% c(22,13)) | 
+                              (PatientID == "VU6NR3G2" & Tx_distance %in% c(13)))
+                           )
+
+not_prophylaxis <- not_prophylaxis %>% select(Container,Container_Date, PatientID,  AntibacDate=Prophylaxis_Date, AntibacName = Prophylaxis_Name, routeOfAdminstrationAntibac= Prophylaxis_Adminstration )
+  
+
+prophy_timeline <- prophy_timeline %>%filter(!(Prophylaxis_Type == "bacterial" & ((PatientID == "2EJGX6A4" & Tx_distance >=14) | 
+                             (PatientID == "58T4MHL7" & Tx_distance %in% c(5,6,14,24)) | 
+                              (PatientID == "EJWTQU66" & Tx_distance %in% c(11,13)) | 
+                              (PatientID == "JEG9X7C9" & Tx_distance %in% c(22,13)) | 
+                              (PatientID == "VU6NR3G2" & Tx_distance %in% c(13)))
+                           ))
+
+not_prophylaxis$antibiotic.class <- c("cephalosporin", "carbapenem", "linezolid", "cephalosporin","linezolid","carbapenem","linezolid","cephalosporin","fluorquinolone", "fosfomycin", "carbapenem", "ureidopenicillin", "cephalosporin" )
+
+not_prophylaxis <- not_prophylaxis %>% left_join(basic.info %>% select(PatientID, Transplantation_Date, Event_Date, rej) %>% distinct(), by="PatientID")
+```
+
+##1.6 Prophylaxis Statistics for C2
+
+```{r}
+### complete C2
+c2_prophy_timeline <- prophy_timeline %>% filter(PatientID %in% cohort2_patients) %>% mutate(Prophylaxis_Date = case_when(PatientID == "Y980VYP6" ~ as.Date("2017-09-22"), T ~ Prophylaxis_Date), Tx_distance= Prophylaxis_Date-Transplantation_Date)
+
+c2_prophy_timeline %>% group_by(PatientID,rej) %>% filter(abs(Tx_distance) <90)  %>% summarise(type_prophy= n_distinct(Prophylaxis_Type), bac=any(Prophylaxis_Type=="bacterial"), viral=any(Prophylaxis_Type=="viral"), fungal=any(Prophylaxis_Type=="fungal") ) %>% group_by(rej) %>% summarise(n=n(), num_bac=length(bac[bac=TRUE]),                                                                                                                   per_bac=length(bac[bac=TRUE])/n(),
+                num_viral=length(viral[viral==TRUE]),                                                                                                                                                                                                                                                                                 per_viral=length(viral[viral==TRUE])/n(),num_fungal=length(fungal[fungal==TRUE]),
+                per_fungal=length(fungal[fungal==TRUE])/n())
+```
+
+
+```{r}
+### prophylaxis overview n=92 c2: 
+
+reducedc2_prophy_timeline <- prophy_timeline %>% filter(PatientID %in% in_patients) %>% mutate(Prophylaxis_Date = case_when(PatientID == "Y980VYP6" ~ as.Date("2017-09-22"), T ~ Prophylaxis_Date), Tx_distance= Prophylaxis_Date-Transplantation_Date)
+
+
+write.table(reducedc2_prophy_timeline, "../tables/ClinicalData/Cohort2/C2_n92_prophylaxis_timeline.tsv", sep="\t", quote = F, row.names = F, col.names = T)
+
+# %>% filter(abs(Tx_distance) <90)
+
+reducedc2_prophy_timeline %>% group_by(PatientID,rej)   %>% summarise(type_prophy= n_distinct(Prophylaxis_Type), bac=any(Prophylaxis_Type=="bacterial"), viral=any(Prophylaxis_Type=="viral"), fungal=any(Prophylaxis_Type=="fungal") ) %>% group_by(rej) %>% summarise(n=n(), num_bac=length(bac[bac=TRUE]),                                                                                                                   per_bac=length(bac[bac=TRUE])/n(),
+                num_viral=length(viral[viral==TRUE]),                                                                                                                                                                                                                                                                                 per_viral=length(viral[viral==TRUE])/n(),num_fungal=length(fungal[fungal==TRUE]),
+                per_fungal=length(fungal[fungal==TRUE])/n())
+
+
+```
+
+## 1.7 Initial Prophylaxis C2 Plot 
+based on reduced_prophy_timeline, prophlyaxis binned by Felix B. 
+```{r}
+initial_prophy<- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Rosa/tables/20240422_prophylaxis.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) 
+
+addline_format <- function(x,...){
+    gsub(' ','\n',  gsub('\\)','\\)\n',  gsub('\\+ ','\\+\n', gsub('/','\n',x))))
+}
+
+
+initial_prophy %>% group_by(rej) %>% filter(!is.na(cotrimoxazole)) %>% mutate(n=n_distinct(PatientID)) %>% group_by(rej,n) %>% summarise_at(vars(-PatientID), ~ sum(. == "yes")) %>% gather( "drug", "counts",-rej,-n) %>% mutate( perc=case_when(rej==0 ~ counts/n, T ~ counts/n), rej=case_when(rej==0 ~ "Normal Progess", T ~ "Rejection"))%>% ggplot(aes(x=reorder(drug, -counts), y=perc, fill=rej)) + geom_bar(stat="identity", position="dodge") + geom_text(aes(label=counts),position = position_dodge(0.9),vjust = 1.5,size=2.8) +  scale_fill_manual(na.translate = F, labels=c("Non Rejection", "Rejection"), values=c( "#0072B5FF","#BC3C29FF")) + theme_classic() + 
+   theme(
+    axis.line = element_line(colour = "darkgrey"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=8),
+    
+    axis.text.x = element_text(color="black", size=8),
+    axis.ticks.x = element_line(color = "black"),
+    
+    axis.title.x  =element_text(size=13),
+    axis.title.y  =element_text(size=13),
+
+    legend.title = element_blank(),
+    legend.text =  element_text(color="black", size=8),
+    legend.position = "top",
+
+    panel.border = element_blank(),
+    panel.background = element_blank()
+    ) + xlab("") + ylab("") +  scale_x_discrete(labels=addline_format(names(initial_prophy)[-c(1,2)]))
+
+
+ggsave("../plots/cohort2/description/distribution_prophylax.pdf", width=8.5, height=4.3)
+
+```
+
+
+#2. Infections and Complications 
+
+##2.1 Bacterial Infections
+
+###2.1.1 Reading Files
+1.4.1 Bact-NeBAntibacterials -> infections "BL.Ba.NeBBa"
+2.3.1 Bact-NeFAntibacterials -> complications and antibactrial treatment, separated in two files
+
+```{r}
+## 1.4.1  Infection File 
+bacterial_infections <- mergeContainer %>% select(PatientID, Container, ends_with("BL.Ba.NeBBa"),Container_Date=Datum..Container..x.x.x.x.x.x.x.x) %>% 
+                                            mutate(AntibacName.BL.Ba.NeBBa= case_when(
+  (AntibacName.BL.Ba.NeBBa == "Other antibacterials") & ! is.na(otherAntibacText.BL.Ba.NeBBa) ~ otherAntibacText.BL.Ba.NeBBa,
+  T ~ AntibacName.BL.Ba.NeBBa
+)) %>% filter(PatientID %in% patientIDs)  #pull(AntiBacName) %>% table()
+
+bacterial_infections <- bacterial_infections %>% filter(rowSums(is.na(bacterial_infections)) != ncol(bacterial_infections)-3)
+
+colnames(bacterial_infections)
+```
+
+
+```{r}
+ #2.3.1Antibacterial Treatment File
+
+X2_3_1Bact_NeFAntibacterials_filtered <- read_delim("Oct22/all_files_containing_patient_information/filtered/2.3.1Bact-NeFAntibacterials_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+X2_3_1Bact_NeFAntibacterials_filtered  %>% mutate(AntiBacName= case_when(
+  (`AntibacName-FU-Ba-NeFBa` == "Other antibacterials") & ! is.na(`otherAntibacText-FU-Ba-NeFBa`) ~ `otherAntibacText-FU-Ba-NeFBa`,
+  T ~ `AntibacName-FU-Ba-NeFBa`
+)) %>% filter(PatientID %in% patientIDs) %>% pull(AntiBacName) %>% table()
+
+#2.3.1 Bacterial Complication File
+
+X2_3_1Bacterialcomplications_filtered <- X2_3_1Bacterialcomplications_filtered %>% filter(!is.na(Container) & PatientID %in% patientIDs) 
+
+## 121 with complication entries 
+X2_3_1Bacterialcomplications_filtered %>%  filter(! is.na(`diagDate-bacInfect-FU-Ba-NeFBa`) ) %>%  summarise(n_distinct(PatientID))
+
+
+lapply(select(X2_3_1Bacterialcomplications_filtered,  ! contains ("#") ), table)
+
+lapply(select(X2_3_1Bacterialcomplications_filtered,  ! contains ("Surgical") | contains("kidney") | contains("surgery") ), table)
+
+
+table(X2_3_1Bacterialcomplications_filtered$`primaryOrReactivation-bacInfect-FU-Ba-NeFBa`)
+
+
+bacterial_complications<- full_join(X2_3_1Bact_NeFAntibacterials_filtered, X2_3_1Bacterialcomplications_filtered, by=intersect(colnames(X2_3_1Bact_NeFAntibacterials_filtered) , colnames(X2_3_1Bacterialcomplications_filtered))
+) %>%rename(Container_Date=`Datum (Container)`)
+```
+
+
+```{r}
+## merge preparation
+
+colnames(bacterial_complications) <- str_replace(colnames(bacterial_complications), "-FU-Ba-NeFBa", "")
+
+colnames(bacterial_complications) <- str_replace(colnames(bacterial_complications), "-", ".")
+
+
+bacterial_complications <- bacterial_complications[,-c(2,4,6:8)]
+
+colnames(bacterial_infections) <- str_replace(colnames(bacterial_infections), ".BL.Ba.NeBBa", "")
+
+intersect(colnames(bacterial_complications) ,colnames(bacterial_infections)) 
+
+
+## merging together 
+
+bac_infec_compl<- full_join(bacterial_complications, bacterial_infections, by= intersect(colnames(bacterial_complications) ,colnames(bacterial_infections)) 
+) %>% arrange(PatientID) %>% distinct()
+```
+
+
+```{r}
+### trying to gather all site columns to one site column 
+site_info <- bac_infec_compl %>% gather("site_bacInfect", "value",  starts_with("site.bacInfect") | starts_with("otherSite"), na.rm = T) 
+
+site_info <- site_info %>% mutate(site_bacInfect = case_when(
+  startsWith(site_bacInfect, "other") ~ value,
+  endsWith("Sitenotidentified", site_bacInfect ) ~ NA,
+  T~ sub(".*#", "", site_bacInfect  )
+)) %>% select( -value)
+
+
+na_site_info <- bac_infec_compl %>%
+  filter(rowSums(is.na(select(., starts_with("site.bacInfect") | starts_with("otherSite") ))) == ncol(select(., starts_with("site.bacInfect") | starts_with("otherSite"))))
+
+na_site_info <- na_site_info %>% mutate(site_bacInfect=rep(NA, nrow(na_site_info))) %>% select(-starts_with("site.bacInfect"), -starts_with("otherSite") )
+# Now filtered_df contains only those rows where all "site-bacInfect" columns have NA values
+
+bac_infec_compl <- rbind(site_info, na_site_info) %>% arrange(PatientID) %>% 
+  group_by_at(vars(-site_bacInfect)) %>% summarise(site_bacInfect= paste(site_bacInfect, collapse=";")) %>% ungroup() 
+
+bac_infec_compl$site_bacInfect
+```
+
+
+```{r}
+## adding miss classified prophlyaxis to bact.infection.compl. table , see Section 1.5 
+bac_infec_compl<- bac_infec_compl %>% mutate(Container_Date = as.Date(Container_Date, format= "%d.%m.%Y") , AntibacDate = as.Date(AntibacDate, format= "%d.%m.%Y"))%>% full_join(not_prophylaxis,., by= names(not_prophylaxis))
+
+
+```
+
+```{r}
+#adding Tx Event Dates and rej status 
+bac_infections <- right_join(basic.info %>% select(PatientID, Transplantation_Date, Event_Date,rej) %>% distinct(),bac_infec_compl %>% select(-contains("AGEFor")), by="PatientID")  
+
+
+
+bac_infections <- bac_infections %>% relocate(Container, Container_Date) %>% 
+                           relocate(diagDate_bacInfect=diagDate.bacInfect, Antibac_Date=AntibacDate, .after=rej) %>%
+                           mutate_at(vars(diagDate_bacInfect, Container_Date, Antibac_Date) , as.Date, format="%d.%m.%Y")
+
+```
+
+###2.1.2 Adding Antibiotic Classes
+
+defined by Felix B. for C2
+15 antibiotic classes: 
+"fluorquinolone",
+"cephalosporin",
+"carbapenem",
+"ureidopenicillin",
+"glycopeptide",
+"aminopenicillin",
+"trimethoprim/sulfomethoxazole",
+"penicillin"                   
+"other",
+"macrolide",
+"amidinopenicillin",            
+"fosfomycin",
+"linezolid",
+"clindamycin",                  
+"metronidazole"
+
+```{r}
+bac_infectionsFB <- read.csv2("../tables/bacterial_infection_FB.tsv", sep="\t") %>% mutate_at(vars(contains("Date")), funs(as.Date(.))) %>% mutate(rej=as.factor(rej))
+
+all(names(bac_infections) %in% intersect(names(bac_infections), names(bac_infectionsFB)) )
+
+bac_infections <-  bac_infections %>% filter(!(PatientID %in% cohort2_patients)) %>% 
+  full_join(bac_infectionsFB,., by=intersect(names(bac_infections), names(bac_infectionsFB))) %>% 
+  full_join(not_prophylaxis, by=intersect(names(not_prophylaxis), names(.))) %>% mutate(antibiotic.class =case_when(antibiotic.class=="" ~ NA, T ~antibiotic.class))
+```
+
+
+
+
+###2.1.3 Redefining Bac. Infections
+
+primaryOrReactivation.bacInfect and OLDclinTypeBacInfectHIDDEN providing information about infection type
+suspected, proven, primary infection,  possible disease, probable disease, and colonization 
+sorting out 
+```{r}
+#bac_infections %>% select(primaryOrReactivation.bacInfect, "typeVerfiedBy.Medicalreport" ,  "typeVerfiedBy.Consultationofattendingdoctor", "OLDclinTypeBacInfectHIDDEN") %>% filter(OLDclinTypeBacInfectHIDDEN == "Colonization") %>% apply(.,2, table)
+
+## replace nas, with old type
+transformed_bac_infections <- bac_infections %>% mutate(primaryOrReactivation.bacInfect = case_when(is.na(primaryOrReactivation.bacInfect) | primaryOrReactivation.bacInfect == "" ~ OLDclinTypeBacInfectHIDDEN, T~primaryOrReactivation.bacInfect))
+
+table(transformed_bac_infections$primaryOrReactivation.bacInfect)
+
+## remove suspected infections 
+transformed_bac_infections<- transformed_bac_infections %>% filter(!primaryOrReactivation.bacInfect %in% c("Possible disease", "Probable disease", "suspected infection") | is.na(primaryOrReactivation.bacInfect)) 
+
+table(transformed_bac_infections$primaryOrReactivation.bacInfect)
+
+# either antibac admin or reactivation type or antibiotic treatment
+
+transformed_bac_infections<- transformed_bac_infections %>% mutate(AntibacName = na_if(AntibacName, ""), primaryOrReactivation.bacInfect=na_if(primaryOrReactivation.bacInfect,"")) 
+
+transformed_bac_infections %>% filter(is.na(primaryOrReactivation.bacInfect))
+
+
+transformed_bac_infections<- transformed_bac_infections %>% filter(!is.na(AntibacName) | !is.na(primaryOrReactivation.bacInfect) | antibioticTreatment == "yes" )
+
+## if diag date is not given, take antibac date
+summary(transformed_bac_infections$diagDate_bacInfect)
+
+transformed_bac_infections<- transformed_bac_infections %>% mutate(diagDate_bacInfect = case_when(is.na(diagDate_bacInfect) ~ Antibac_Date, T ~ diagDate_bacInfect))
+
+summary(transformed_bac_infections$diagDate_bacInfect)
+
+## check whether entries are in close proximity and remove them if its 5 days or less
+transformed_bac_infections<- transformed_bac_infections %>% group_by(PatientID) %>% arrange(PatientID, diagDate_bacInfect) %>%
+  mutate(
+    # Calculate the difference between current and previous diagnosis dates
+    diff_to_next_infection = c(NA, difftime(diagDate_bacInfect[-1], diagDate_bacInfect[-n()], units = "days")),
+    # Flag rows where the difference is less than or equal to 5 days
+    flag = ifelse(diff_to_next_infection <= 5, TRUE, FALSE),
+  
+  ) %>% ungroup() 
+
+
+table(transformed_bac_infections$diff_to_next_infection)
+summary(transformed_bac_infections$diff_to_next_infection)
+
+## for one infection several entries, due to differet given antibiotics or other reason, keeping them in for the antibiotic variables 
+
+```
+
+
+### 2.1.4 Plot Antibiotic Usage C2
+
+```{r}
+bac_infection_cohort2 <-  transformed_bac_infections %>% filter(PatientID %in% in_patients)  %>%   mutate(Antibac_Date= case_when(is.na(Antibac_Date) &  !is.na(diagDate_bacInfect) ~ diagDate_bacInfect, T ~ Antibac_Date )) # %>% filter(! is.na(Antibac_Date) | ! is.na(AntibacName))
+  
+  
+bac_infection_cohort2<- bac_infection_cohort2 %>% mutate(Tx_AntiBac_distance= Antibac_Date - Transplantation_Date, 
+                                                         Event_AntiBac_distance= Antibac_Date - Event_Date,
+                                                         .after=rej )  %>% filter(!is.na(antibiotic.class) & antibiotic.class !="")
+
+bac_infection_cohort2 %>% group_by(PatientID,rej) %>% summarise(num_different_antibac = n_distinct(antibiotic.class,na.rm = T) , num_antibac= n()) %>% mutate(num_antibac = case_when(num_different_antibac ==0 ~ 0, T ~ num_antibac)) %>%
+  ggplot(aes(x=rej, y= num_antibac, fill=rej)) + geom_boxplot() +
+  stat_compare_means(label.x.npc = "center", size=5) + xlab("") + ylab("Number of Antibacterials") +theme(legend.position = "none") + scale_x_discrete(label= c("Normal Progress", "Rejection"))
+
+
+
+all_132_cases <-bac_infection_cohort2 %>% mutate(grp= case_when(rej==0 ~ "NormalProgress", T ~ "BeforeRejection")) %>% rbind(bac_infection_cohort2 %>% filter(rej==1) %>% mutate(grp= "AfterRejection")) %>% rbind(bac_infection_cohort2 %>% filter(rej==1) %>% mutate(grp= "Rejection")) %>% relocate(grp,.after=Event_AntiBac_distance ) %>% distinct(PatientID, grp)
+
+
+
+plot_infection_data <- bac_infection_cohort2 %>% mutate(grp= case_when(rej==0 ~ "NormalProgress", T ~ "BeforeRejection")) %>% rbind(bac_infection_cohort2 %>% filter(rej==1) %>% mutate(grp= "AfterRejection"))%>% rbind(bac_infection_cohort2 %>% filter(rej==1) %>% mutate(grp= "Rejection"))%>% relocate(grp,.after=Event_AntiBac_distance ) %>% filter((grp=="AfterRejection" & Event_AntiBac_distance >0 & !is.na(Event_AntiBac_distance)) |
+                                          (grp=="BeforeRejection" & Event_AntiBac_distance <0 & !is.na(Event_AntiBac_distance)) | 
+                                            (grp=="Rejection"  & !is.na(Event_AntiBac_distance)) |
+                                            (grp=="NormalProgress" & is.na(Event_AntiBac_distance)) )%>%
+  
+   #mutate(antibiotic.class = case_when(antibiotic.class== "" ~ NA, T~ antibiotic.class)  )  %>% 
+ # distinct(PatientID, Tx_AntiBac_distance, Event_AntiBac_distance, rej, grp, Antibac_Date, antibiotic.class,routeOfAdminstrationAntibac) %>% 
+  group_by(PatientID,grp) %>%
+  summarise(num_different_antibac = n_distinct(antibiotic.class[Tx_AntiBac_distance >= 0  & !is.na(Antibac_Date)],na.rm = T) , 
+            num_antibac= length(antibiotic.class[Tx_AntiBac_distance >= 0  & !is.na(Antibac_Date) ]), 
+            num_parenteral= sum(routeOfAdminstrationAntibac[Tx_AntiBac_distance >= 0 & !is.na(Antibac_Date)] == "parenteral")) %>% 
+  
+  right_join(.,all_132_cases, by=c("PatientID", "grp")) %>% replace(is.na(.),0) %>% 
+  
+  gather("type", "number", num_antibac,num_different_antibac, num_parenteral)
+
+plot_infection_data$grp <- factor(plot_infection_data$grp,level=c("NormalProgress", "Rejection", "BeforeRejection", "AfterRejection"))
+plot_infection_data$inter <- interaction( plot_infection_data$grp,plot_infection_data$type)
+
+levels=levels(plot_infection_data$inter)
+my_comparisons <- list(c(levels[1], levels[2]),
+                       c(levels[3], levels[4]),
+                       c(levels[5], levels[6]),
+                       c(levels[7], levels[8]),
+                       c(levels[9], levels[10]),
+                       c(levels[11], levels[12])
+                       )
+
+#label.y=max(plot_infection_data$number)*1.03
+my_comparisons <- list(c("NormalProgress", "Rejection"), c("BeforeRejection", "AfterRejection"))
+
+antbiotic_admin_plot <-   ggplot(plot_infection_data,aes(x=grp,  y= number, fill=factor(grp,level=c("NormalProgress", "Rejection", "BeforeRejection", "AfterRejection"))))  + geom_boxplot() + facet_wrap(~type, labeller = labeller(type=c("num_antibac"="Total number of antibiotics\ntaken after KT", "num_different_antibac"="Number of different antibiotics\ntaken after KT", "num_parenteral"="Total number of\nparenteral administration")))+
+ xlab("") + ylab("")  +   theme(legend.title = element_blank(),axis.ticks.x = element_blank(), axis.text.x = element_text(size=13), legend.text=element_text(size=13)) +  
+    stat_compare_means(comparisons = my_comparisons, method = "wilcox.test", label = "p.format", label.y=max(plot_infection_data$number)*1.01) +
+theme_bw() + 
+  theme(
+   strip.text = element_text(size=11),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=9),
+    axis.text.x = element_text(color="black", size=10),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=10),
+    axis.title.y  =element_text(size=10),
+    legend.title = element_blank(),
+    legend.position="none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) + scale_x_discrete(labels=c("Normal\nProgress", "Rejection", "Before\nRejection", "After\nRejection")) + scale_fill_manual(values=c( "#0072B5FF","#BC3C29FF","#E18727FF", "#20854EFF"))
+
+  
+ggsave("../plots/cohort2/description/removed_antibiotic_administration.pdf", antbiotic_admin_plot, width=10, height=6)
+
+```
+
+
+
+##2.2 Viral Infections
+
+###2.2.1 Reading Files
+
+2.3.2 for complications
+1.4.2 for infections 
+
+
+#### Infection File 
+
+taken infections as a subset from the merged container indexed file:
+
+```{r}
+## 1.4.2 infectionsAV
+select(mergeContainer, PatientID, AntiviralName.BL.Vi.NeBvi , otherAntiviralsText.BL.Vi.NeBvi)  %>% mutate(AntiViralName= case_when(
+  (AntiviralName.BL.Vi.NeBvi == "Other antivirals") & ! is.na( otherAntiviralsText.BL.Vi.NeBvi) ~ otherAntiviralsText.BL.Vi.NeBvi,
+  T ~AntiviralName.BL.Vi.NeBvi
+)) %>% filter(PatientID %in% patientIDs) %>% distinct(PatientID, AntiViralName) %>% pull(AntiViralName) %>% table()
+```
+
+
+```{r}
+viral_infections <- select(mergeContainer, PatientID, Container, Container_Date=Datum..Container..y.y.y.y.y.y.y.y,  contains("BL.Vi.NeBvi"))
+
+colnames(viral_infections)<- sub(".BL.Vi.NeBvi", "", colnames(viral_infections))
+
+table(viral_infections$AntiviralName)
+
+viral_infections <- viral_infections %>%  mutate(AntiviralName = case_when(is.na(AntiviralName) ~ otherAntiviralsText, 
+                                   AntiviralName == "Other antivirals"  ~ otherAntiviralsText, 
+                                   T ~  AntiviralName)) %>% select(-otherAntiviralsText)
+
+table(viral_infections$AntiviralName)
+```
+
+
+#### Complication Files
+
+some general checking
+```{r}
+## 2.3 Complications 
+X2_3_NeFVir_Viral_complicaAV_filtered <- read_delim("Oct22/all_files_containing_patient_information/filtered/2.3.-NeFVir_Viral_complicaAV_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+X2_3_NeFVir_Viral_complicaAV_filtered <- X2_3_NeFVir_Viral_complicaAV_filtered %>%  filter(PatientID %in% patientIDs)
+
+X2_3_NeFVir_Viral_complicaAV_filtered  %>% mutate(AntiViralName= case_when(
+  (`AntiviralName-FU-Vi-NeFVi` == "Other antivirals") & ! is.na( `otherAntiviralsText-FU-Vi-NeFVi`) ~`otherAntiviralsText-FU-Vi-NeFVi`,
+  T ~ `AntiviralName-FU-Vi-NeFVi`
+)) %>% distinct(PatientID, AntiViralName) %>% pull(AntiViralName)  %>% table()
+
+```
+
+```{r}
+X2_3_2Viralcomplications_filtered <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/filtered/2.3.2Viralcomplications_filtered.csv",  delim = ";", escape_double = FALSE, trim_ws = TRUE) %>% filter(!is.na(Container) & PatientID %in% patientIDs) 
+
+X2_3_2Viralcomplications_filtered %>% filter(! is.na(`diagDate-virInfect-FU-Vi-NeFVi`) ) %>% summarise(n_distinct(PatientID))
+
+table(X2_3_2Viralcomplications_filtered$`primaryOrReactivation-virInfect-FU-Vi-NeFVi`)
+
+## postive testing for different viruses -> very sparse 
+lapply(select(X2_3_2Viralcomplications_filtered,   contains ("kidney") ), table)
+
+
+### belonging antiviral treatments 
+X2_3_NeFVir_Viral_complicaAV_filtered <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle//Oct22/all_files_containing_patient_information/filtered/2.3.-NeFVir_Viral_complicaAV_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) %>% 
+  filter(!is.na(Container) & PatientID %in% patientIDs)
+```
+
+###2.2.2 Merging Files
+```{r}
+#merging antivirals and complications together 
+
+viral_complications <- full_join(X2_3_NeFVir_Viral_complicaAV_filtered, X2_3_2Viralcomplications_filtered, by=intersect(colnames(X2_3_2Viralcomplications_filtered) ,colnames(X2_3_NeFVir_Viral_complicaAV_filtered)))
+
+colnames(viral_complications) <- sub("-", ".", sub("-FU-Vi-NeFVi", "",colnames(viral_complications) ))
+
+## add other antiviral text to missing antiviral name 
+
+viral_complications <- viral_complications %>% 
+  mutate(AntiviralName = case_when(is.na(AntiviralName) ~ otherAntiviralsText, 
+                                   AntiviralName == "Other antivirals"  ~ otherAntiviralsText, 
+                                   T ~  AntiviralName)) %>% 
+  select(-otherAntiviralsText, -Status, -Dokument,  -`Container Index`, -Erfassungsdatum, -`2.3..NeFVir_Viral_complicaAV`) %>% rename(Container_Date=`Datum (Container)`)
+
+
+
+viral_infec_compl<- full_join(viral_infections,viral_complications, by= intersect(colnames(viral_infections), colnames(viral_complications))) %>%
+                    mutate(diagDate_virInfect= as.Date(diagDate.virInfect, format="%d.%m.%Y"),
+                           Antiviral_Date= as.Date(AntiviralProDate, format="%d.%m.%Y"),
+                           Container_Date= as.Date(Container_Date, format="%d.%m.%Y"), .keep="unused", .after=Container) %>%
+                    relocate(Container, Container_Date)
+
+viral_infec_compl<- viral_infec_compl  %>% filter(rowSums(is.na(viral_infec_compl)) < ncol(viral_infec_compl)-2)
+
+
+viral_infec_compl  %>% filter(is.na(diagDate_virInfect))
+```
+
+```{r}
+vir_infections <- left_join( basic.info %>% select(PatientID, Transplantation_Date, Event_Date,rej) %>% distinct(),  viral_infec_compl , by="PatientID") %>% select( -contains("AGEf")) %>% 
+                          relocate(Container, Container_Date) %>%
+                          relocate(starts_with("fever"), .after=AntiviralName)
+
+
+```
+
+
+###2.2.3 Subsetting to interested Columns
+```{r}
+viral_subset <- vir_infections %>% select(Container, PatientID, rej, Transplantation_Date, Event_Date, diagDate_virInfect, cmvPCR, cmv2PCR,  bkvPCR,bkv2PCR,	ebvPCR, ebv2PCR,
+primaryOrReactivation.virInfect, OLDclinTypeVirInfectHIDDEN) %>% filter(!is.na(Container)) %>% distinct()
+
+
+
+## nas auffüllen von xx2PCR ? 
+
+viral_subset<- viral_subset %>% mutate(cmvPCR = case_when(is.na(cmvPCR) & !is.na(cmv2PCR) ~ cmv2PCR, T ~ cmvPCR),
+                       bkvPCR = case_when(is.na(bkvPCR) & !is.na(bkv2PCR) ~ bkv2PCR, T ~ bkvPCR) ,
+                       ebvPCR = case_when(is.na(ebvPCR) & !is.na(ebv2PCR) ~ ebv2PCR, T ~ ebvPCR)) %>% select(-ends_with("2PCR"), -OLDclinTypeVirInfectHIDDEN, -Container)
+
+viral_subset <- viral_subset %>% mutate(ViralInfec_Tx_Distance= diagDate_virInfect - Transplantation_Date, .after=diagDate_virInfect)
+```
+
+
+
+
+###2.2.4 Redefining Viral Infection
+
+remove labeled suspected infection,  Detection of antibodies without signs of acute disease, not counting as viral infections
+```{r}
+## taken from vir_infections only diagnosis date and type of viral infections
+transformed_viral_infec <- vir_infections %>% select(Container, PatientID, rej, Transplantation_Date, Event_Date, diagDate_virInfect,
+primaryOrReactivation.virInfect, OLDclinTypeVirInfectHIDDEN) %>% filter(!is.na(diagDate_virInfect)) %>% distinct()
+
+## adding distance to Tx
+transformed_viral_infec <- transformed_viral_infec %>% mutate(ViralInfec_Tx_Distance= diagDate_virInfect - Transplantation_Date, .after=diagDate_virInfect)
+
+## in case primary or reactivation is na, then take old clin type 
+transformed_viral_infec %>% mutate(primaryOrReactivation.virInfect = case_when(is.na(primaryOrReactivation.virInfect) ~ OLDclinTypeVirInfectHIDDEN, T ~ primaryOrReactivation.virInfect)) 
+
+## getting rid of all Detection of antibodies without signs of acute disease and suspected infection
+transformed_viral_infec <- transformed_viral_infec %>% filter(primaryOrReactivation.virInfect != "suspected infection" & primaryOrReactivation.virInfect != "Detection of antibodies without signs of acute disease")
+
+## check whether entries are in close proximity and remove them if its 5 days or less
+transformed_viral_infec<- transformed_viral_infec %>% group_by(PatientID) %>% arrange(PatientID, diagDate_virInfect) %>%
+  mutate(
+    # Calculate the difference between current and previous diagnosis dates
+    diff_to_next_infection = c(NA, difftime(diagDate_virInfect[-1], diagDate_virInfect[-n()], units = "days")),
+    # Flag rows where the difference is less than or equal to 5 days
+    flag = ifelse(diff_to_next_infection <= 5, TRUE, FALSE),
+  
+  ) %>% ungroup() %>%
+## for two patients , flag==T, two entries on the same diag date is given -> remove one of them 
+  filter(!flag |is.na(flag) )
+
+summary(transformed_viral_infec$diff_to_next_infection)
+
+
+
+```
+
+###2.2.5 Plots of Viral Infection C2
+```{r}
+# everything after kt 
+data.frame(basic.info %>% filter(PatientID %in% cohort2_patients) %>% select(PatientID, rej) %>% distinct()) %>% left_join(.,transformed_viral_infec, by=c("PatientID","rej") ) %>% filter(ViralInfec_Tx_Distance >=0 | is.na(ViralInfec_Tx_Distance)) %>% group_by(PatientID,rej) %>% summarise(n=n_distinct(diagDate_virInfect, na.rm = T)) %>%
+  ggplot(aes(x=rej, y=n, fill=rej)) +  geom_boxplot() +  stat_compare_means(label.x.npc = "center", size=4 , method= "wilcox.test") + xlab("") + ylab("Number of Viral Infections after KT")  +theme(legend.position = "none") + scale_x_discrete(label= c("Normal Progress", "Rejection"))
+```
+
+
+```{r}
+## time frame kt to sample
+
+viral_infec_plot <- data.frame(basic.info %>% filter(PatientID %in% cohort2_patients) %>% select(PatientID, SampleID, Sample_Date=Date, rej) %>% distinct()) %>% left_join(.,transformed_viral_infec, by=c("PatientID","rej") ) %>% filter(ViralInfec_Tx_Distance >=0 | is.na(ViralInfec_Tx_Distance)) %>% group_by(PatientID,rej) %>%
+  
+  summarise(KT_Sample=n_distinct(diagDate_virInfect[diagDate_virInfect <= Sample_Date], na.rm = T), all_KT=n_distinct(diagDate_virInfect, na.rm = T)) %>%
+  gather("time_frame", "value", KT_Sample,all_KT) %>%
+  
+  ggplot(aes(x=rej, y=value, fill=rej)) +  geom_boxplot() +  stat_compare_means(label.x.npc = "center", size=3.3, method= "wilcox.test", label.x=1.2) + xlab("") + ylab("Number of Viral Infections")  + facet_wrap(~time_frame, labeller = labeller(time_frame = 
+    c("all_KT" = "all follow-ups after KT", "KT_Sample"= "time span KT to Sample"))) +  theme_bw() +
+    theme(
+   strip.text = element_text(size=12),
+    strip.background = element_blank(),
+    strip.placement = "outside", # Remove facet borders
+    line = element_line(colour = "black"),
+    axis.ticks.y  = element_line(color = "black"),
+    axis.text.y = element_text(color="black", size=11),
+    axis.text.x = element_text(color="black", size=12),
+    axis.ticks.x = element_line(color = "black"),
+    axis.title.x  =element_text(size=12),
+    axis.title.y  =element_text(size=12),
+    legend.title = element_blank(),
+    legend.position="none",
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank()
+  ) + 
+    scale_x_discrete(label= c("Normal Progress", "Rejection")) +  scale_fill_nejm()
+  scale_fill_manual(breaks=c(0, 1), values=c( "#0072B5FF","#BC3C29FF")) 
+
+ggsave("../plots/cohort2/description/latex_viral_infections.pdf", viral_infec_plot, width=7, height=4, dpi=300)
+#+ scale_x_discrete(label= c("Normal Progress", "Rejection"))
+```
+
+
+#3. Fungal Infections
+
+##3.1. Reading Files
+- 1.4.3 only one patient with infection
+-2.3.3 fungal complications 
+-2.3 AF: belonging antifungal treatments 
+
+
+```{r}
+
+#### Complications 
+X2_3_3Fungalcomplications_filtered <- read_delim("../../Oct22/all_files_containing_patient_information/filtered/2.3.3Fungalcomplications_filtered.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+X2_3_3Fungalcomplications_filtered <- X2_3_3Fungalcomplications_filtered  %>% filter(!is.na(Container) & PatientID %in% patientIDs) 
+
+X2_3_3Fungalcomplications_filtered %>% filter(! is.na(`diagDate-fungInfect-FU-Fu-NeFMy`) ) %>% summarise(n_distinct(PatientID))
+
+table(X2_3_3Fungalcomplications_filtered$`primaryOrReactivation-fungInfect-FU-Fu-NeFMy`)
+
+ X2_3_3Fungalcomplications_filtered <- X2_3_3Fungalcomplications_filtered%>% select(-Dokument, -Erfassungsdatum, -`Container Index`, -Status, -contains("AGEF"))
+
+
+colnames(X2_3_3Fungalcomplications_filtered) 
+
+### belonging anti fungal treatments
+X2_3_NeFMyc_Fungal_complicaAF <- read_delim("/fast/AG_Forslund/shared/DZIF_CKD_Holle/Oct22/all_files_containing_patient_information/2.3-NeFMyc_Fungal_complicaAF.csv", 
+    delim = ";", escape_double = FALSE, trim_ws = TRUE) 
+
+X2_3_NeFMyc_Fungal_complicaAF <- X2_3_NeFMyc_Fungal_complicaAF %>% select(-Dokument, -Erfassungsdatum, -`Container Index`, -Status, -`2.3-NeFMyc_Fungal_complicaAF`, -`otherAntifungText-FU-Fu-NeFMy`, -`AntifungDate-FU-Fu-NeFMyAGEForVariable`)
+
+
+### add AF to complications 
+X2_3_NeFMyc_Fungal_complicaAF$Container %in% X2_3_3Fungalcomplications_filtered$Container
+
+fungal_complications<- right_join(X2_3_NeFMyc_Fungal_complicaAF, X2_3_3Fungalcomplications_filtered, by=c("PatientID","Container","Datum (Container)"))
+
+## change column names 
+
+colnames(fungal_complications) <- str_replace(colnames(fungal_complications), "-FU-Fu-NeFMy", "")
+colnames(fungal_complications) <- str_replace_all(colnames(fungal_complications), "-", ".")
+
+## change dates 
+
+fungal_complications <- fungal_complications %>% relocate(Container, Container_Date=`Datum (Container)`) %>%
+                                                 mutate(Container_Date= as.Date(Container_Date, format="%d.%m.%Y")) %>%
+                                                 mutate(diagDate_fungInfect = as.Date(diagDate.fungInfect, format="%d.%m.%Y"),
+                                                   Antifung_Date=  as.Date(AntifungDate, format="%d.%m.%Y"), 
+                                                        .keep="unused", .after=PatientID) 
+## add basic info 
+
+fungal_complications <- basic.info %>% select(PatientID, Transplantation_Date, Event_Date, rej) %>% distinct() %>% right_join(fungal_complications, by="PatientID") %>% relocate(Container, Container_Date)
+
+
+
+```
+
+#4. Statistics for Cohort2 for all Infections
+
+```{r}
+## fungal infection 
+selected_fungal_infec %>% remove_empty("cols")  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% cohort2_Ids),., by="PatientID") %>% mutate(diff=diagDate_fungInfect - SampleDate) %>%  group_by(PatientID) %>% filter(diff < 0) %>% group_by(rej) %>% summarise(n())
+
+
+## bac infection 
+bac_infections %>% filter(PatientID %in% cohort2_patients)  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% cohort2_Ids),., by="PatientID") %>%   mutate(diff=diagDate_bacInfect - SampleDate)  %>% filter(diff <=0 & !is.na(diff)) %>% distinct(SampleID, diagDate_bacInfect, rej, diff) %>% group_by(rej) %>% summarise(n=n(), patient=n_distinct(SampleID)) 
+
+#table(bac_infections$primaryOrReactivation.bacInfect)
+
+
+## transformed bac infection
+## for not counting infection twice, diff_to_infection > 5
+transformed_bac_infections %>% filter(PatientID %in% in_patients)  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% in_samples),., by="PatientID") %>% filter(diff_to_next_infection > 5 | is.na(diff_to_next_infection)) %>%
+mutate(diff=diagDate_bacInfect - SampleDate) %>% filter(diff <= 0 & !is.na(diff)) %>% distinct(SampleID,  rej, diff) %>% group_by(rej) %>% summarise(n=n(), patient=n_distinct(SampleID)) 
+
+# viral infection
+
+viral_subset %>% filter(PatientID %in% in_patients)  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% cohort2_Ids),., by="PatientID") %>%   mutate(diff=diagDate_virInfect - SampleDate) %>% filter(diff <= 0 & !is.na(diff)) %>% distinct(SampleID,  rej, diff) %>% group_by(rej) %>% summarise(n=n(), patient=n_distinct(SampleID)) 
+
+## transformed viral infection 
+
+## numbers
+transformed_viral_infec %>% filter(PatientID %in% in_patients)  %>% full_join(basic.info %>% select(SampleID, SampleDate=Date, PatientID) %>% filter(SampleID %in% in_samples),., by="PatientID") %>%   mutate(diff=diagDate_virInfect - SampleDate) %>% filter(diff <= 0 & !is.na(diff)) %>% distinct(SampleID,  rej, diff) %>% group_by(rej) %>% summarise(n=n(), patient=n_distinct(SampleID)) 
+
+## types
+transformed_viral_infec %>% filter(PatientID %in% in_patients & rej==1) %>% count(rej, primaryOrReactivation.virInfect)
+
+viral_infec_compl
+```
+
