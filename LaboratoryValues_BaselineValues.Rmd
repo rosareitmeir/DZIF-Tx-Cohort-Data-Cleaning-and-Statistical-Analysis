@@ -59,13 +59,13 @@ X1_NeBGeneral_information_IC_filtered <- X1_NeBGeneral_information_IC_filtered %
 baseline.table<- left_join(baseline.table, X1_NeBGeneral_information_IC_filtered , by="PatientID") %>% relocate(starts_with("ICD"), .before=registrationDate)
 
 ## error switched height and weight 
-# PatientID == "MWD5FRF0"
+# patient with mistake 
 weight <- baseline.table[59,12]
 height <- baseline.table[59,13]
 baseline.table[59,12] <- height
 baseline.table[59,13] <- weight
 baseline.table[59,]
-## 21YDKU88
+# second patient with switched entries
 weight <- baseline.table[118,12]
 height <- baseline.table[118,13]
 baseline.table[118,12] <- height
