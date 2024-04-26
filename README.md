@@ -20,3 +20,4 @@ Analysis:
 
 - function.R contains several functions used to run the assocaition analysis with metadeconfoundR (preparation of meta input, feature input,...) + visualization functions (volcanos,heatmaps,...)
   
+most of the files rely on the table basic.info, which can be find in the supplement.
